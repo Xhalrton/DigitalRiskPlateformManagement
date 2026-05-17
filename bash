@@ -1,3 +1,3 @@
-git add runtime.txt requirements.txt
-git commit -m "Fix Python 3.11 compatibility"
+git add app.py
+git commit -m "Ajout routes test"
 git push origin main
