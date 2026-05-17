@@ -1,9 +1,18 @@
 services:
   - type: web
     name: digitalriskplatform
-    env: python
+    runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 30 --workers 1 --threads 2
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 30 --workers 1 --threads 2 --keep-alive 2 --max-requests 100 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: GROQ_KEY
+        sync: false
+      - key: WA_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
