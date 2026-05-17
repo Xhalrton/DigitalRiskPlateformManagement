@@ -986,3 +986,50 @@ def recevoir_message():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+# ============================================================
+# ROUTES DE TEST (temporaires)
+# ============================================================
+
+@app.route("/test-db")
+def test_db():
+    if not supabase:
+        return "Supabase non configuré", 500
+    try:
+        result = supabase.table("risques").select("count", count="exact").execute()
+        count = result.count if hasattr(result, 'count') else "OK"
+        return f"Connexion OK - Risques: {count}", 200
+    except Exception as e:
+        return f"Erreur: {str(e)}", 500
+
+@app.route("/test-insert")
+def test_insert():
+    if not supabase:
+        return "Supabase non configuré", 500
+    try:
+        risque_id = generer_risque_id("RAN")
+        data = {
+            "risque_id": risque_id,
+            "source_stakeholder_contact": "+2250101089251",
+            "type_projet": "RAN",
+            "nom_projet": "Test Projet",
+            "site": "Cocody",
+            "message_original": "# Test manuel",
+            "type_risque": "TECHNIQUE",
+            "description_risque": "Test description",
+            "score_probabilite_1_5": 3,
+            "score_impact_1_5": 4,
+            "owner_contact": "+2250101089251"
+        }
+        result = supabase.table("risques").insert(data).execute()
+        return f"Risque créé: {risque_id}", 200
+    except Exception as e:
+        return f"Erreur: {str(e)}", 500
+
+# ============================================================
+# DEMARRAGE
+# ============================================================
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
