@@ -39,11 +39,9 @@ ESCALADE = {
 TYPES_PROJET = ["RAN", "RURAL", "FIBRE", "CORE", "IPRAN", "MWV", "MMONEY", "HOME", "AUTRES"]
 TYPES_RISQUE = ["ACCES", "SECURITE", "TECHNIQUE", "ADMINISTRATIF", "METEO", "LOGISTIQUE", "SANITAIRE", "SOCIAL", "AUTRES"]
 
-messages_traites = set()
-
 # Clients
-groq_client = Groq(api_key=GROQ_KEY)
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL else None
+groq_client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 LIEN_DASHBOARD = os.environ.get("DASHBOARD_URL", "https://google.com")
 
@@ -216,6 +214,21 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
 # ============================================================
 
 def analyser_risque_ia(description, site, type_projet):
+    if not groq_client:
+        print("==> GROQ non configuré, analyse par défaut")
+        return {
+            "type_risque": "AUTRES",
+            "description_risque": description[:100],
+            "impact_risque": "A evaluer",
+            "score_probabilite_1_5": 3,
+            "score_impact_1_5": 3,
+            "bloquer_projet": False,
+            "strategie_de_reponse": "REDUCTION",
+            "action_immediate": "Evaluation sur site requise",
+            "confiance": 0.3,
+            "justification_scores": "IA non disponible - defaut"
+        }
+    
     prompt = f"""Tu es un expert en gestion des risques telecoms.
 
 CONTEXTE:
@@ -980,9 +993,6 @@ def recevoir_message():
     return jsonify({"status": "ok"})
 
 # ============================================================
-# DEMARRAGE
-# ============================================================
-# ============================================================
 # ROUTES DE TEST (temporaires)
 # ============================================================
 
@@ -1028,4 +1038,3 @@ def test_insert():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
