@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: digitalriskplatform
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: GROQ_KEY
+        sync: false
+      - key: WA_TOKEN
+        sync: false
+      - key: WA_PHONE_ID
+        sync: false
+      - key: WA_APP_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
