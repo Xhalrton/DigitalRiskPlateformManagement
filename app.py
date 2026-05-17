@@ -39,9 +39,21 @@ ESCALADE = {
 TYPES_PROJET = ["RAN", "RURAL", "FIBRE", "CORE", "IPRAN", "MWV", "MMONEY", "HOME", "AUTRES"]
 TYPES_RISQUE = ["ACCES", "SECURITE", "TECHNIQUE", "ADMINISTRATIF", "METEO", "LOGISTIQUE", "SANITAIRE", "SOCIAL", "AUTRES"]
 
-# Clients
-groq_client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+# Clients - initialisation paresseuse
+_groq_client = None
+_supabase_client = None
+
+def get_groq_client():
+    global _groq_client
+    if _groq_client is None and GROQ_KEY:
+        _groq_client = Groq(api_key=GROQ_KEY)
+    return _groq_client
+
+def get_supabase():
+    global _supabase_client
+    if _supabase_client is None and SUPABASE_URL and SUPABASE_KEY:
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase_client
 
 LIEN_DASHBOARD = os.environ.get("DASHBOARD_URL", "https://google.com")
 
@@ -81,7 +93,8 @@ def verifier_signature(request):
 # ============================================================
 
 def get_prefix(type_projet):
-    """Récupère le prefix personnalisé depuis Supabase ou défaut"""
+    """Recupere le prefix personnalise depuis Supabase ou defaut"""
+    supabase = get_supabase()
     if not supabase:
         return type_projet[:3].upper()
     try:
@@ -94,8 +107,8 @@ def get_prefix(type_projet):
 
 def generer_risque_id(type_projet):
     """
-    Génère ID format XXXAAMM0000
-    3 caractères prefix + 2 année + 2 mois + 4 séquence
+    Genere ID format XXXAAMM0000
+    3 caracteres prefix + 2 annee + 2 mois + 4 sequence
     Ex: RAN26050001, FIB26050142
     """
     prefix = get_prefix(type_projet)
@@ -104,6 +117,7 @@ def generer_risque_id(type_projet):
     mm = f"{now.month:02d}"
     base_prefix = f"{prefix}{aa}{mm}"
     
+    supabase = get_supabase()
     if supabase:
         try:
             result = supabase.table("risques").select("risque_id").like("risque_id", f"{base_prefix}%").execute()
@@ -122,6 +136,7 @@ def generer_risque_id(type_projet):
 # ============================================================
 
 def sauvegarder_risque_complet(data, message_id=None):
+    supabase = get_supabase()
     if not supabase:
         return None
     try:
@@ -133,6 +148,7 @@ def sauvegarder_risque_complet(data, message_id=None):
         return None
 
 def recuperer_risque_par_id(risque_id):
+    supabase = get_supabase()
     if not supabase:
         return None
     try:
@@ -143,6 +159,7 @@ def recuperer_risque_par_id(risque_id):
         return None
 
 def mettre_a_jour_risque(risque_id, updates):
+    supabase = get_supabase()
     if not supabase:
         return False
     try:
@@ -160,6 +177,7 @@ def fermer_risque(risque_id, reponse, par_qui):
     })
 
 def get_astreinte(role):
+    supabase = get_supabase()
     if not supabase:
         return {"telephone": CONTACTS.get(role), "nom": role}
     try:
@@ -184,7 +202,7 @@ def get_astreinte(role):
 
 def envoyer_whatsapp(numero, message, message_id_reference=None):
     if WA_TOKEN == "placeholder":
-        print(f"==> [SIMULATION] WhatsApp à {numero}: {message[:50]}...")
+        print(f"==> [SIMULATION] WhatsApp a {numero}: {message[:50]}...")
         return None
     
     url = f"https://graph.facebook.com/v18.0/{WA_PHONE_ID}/messages"
@@ -202,8 +220,8 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
         data["context"] = {"message_id": message_id_reference}
     
     try:
-        resp = requests.post(url, headers=headers, json=data)
-        print(f"==> WhatsApp à {numero}: {resp.status_code}")
+        resp = requests.post(url, headers=headers, json=data, timeout=10)
+        print(f"==> WhatsApp a {numero}: {resp.status_code}")
         return resp.json().get("messages", [{}])[0].get("id")
     except Exception as e:
         print(f"==> Erreur envoi: {e}")
@@ -214,8 +232,9 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
 # ============================================================
 
 def analyser_risque_ia(description, site, type_projet):
+    groq_client = get_groq_client()
     if not groq_client:
-        print("==> GROQ non configuré, analyse par défaut")
+        print("==> GROQ non configure, analyse par defaut")
         return {
             "type_risque": "AUTRES",
             "description_risque": description[:100],
@@ -263,7 +282,8 @@ Ne mets rien d'autre que le JSON."""
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            max_tokens=600
+            max_tokens=600,
+            timeout=15
         )
         result = json.loads(response.choices[0].message.content)
         
@@ -437,7 +457,7 @@ def traiter_risque_confirme(expediteur, data, message_id):
     
     analyse = analyser_risque_ia(data["description"], data["site"], data["type_projet"])
     
-    # Générer ID XXXAAMM0000
+    # Generer ID XXXAAMM0000
     risque_id = generer_risque_id(data["type_projet"])
     
     db_data = {
@@ -463,7 +483,7 @@ def traiter_risque_confirme(expediteur, data, message_id):
         envoyer_whatsapp(expediteur, "Erreur sauvegarde. Reessayez avec #.")
         return True
     
-    # Récupérer pour avoir score_global et priorite calculés
+    # Recuperer pour avoir score_global et priorite calcules
     risque_complet = recuperer_risque_par_id(risque_id)
     score_global = risque_complet.get("score_global", 15) if risque_complet else 15
     priorite = risque_complet.get("priorite", "ELEVE") if risque_complet else "ELEVE"
@@ -644,6 +664,7 @@ def traiter_recherche_periode(expediteur, message):
     return False
 
 def envoyer_liste_mois(expediteur, annee, mois):
+    supabase = get_supabase()
     if not supabase:
         envoyer_whatsapp(expediteur, "Base non disponible.")
         return True
@@ -681,6 +702,7 @@ def envoyer_liste_mois(expediteur, annee, mois):
         return True
 
 def envoyer_liste_annee(expediteur, annee):
+    supabase = get_supabase()
     if not supabase:
         envoyer_whatsapp(expediteur, "Base non disponible.")
         return True
@@ -717,6 +739,7 @@ def envoyer_liste_annee(expediteur, annee):
         return True
 
 def envoyer_stats_mois(expediteur, annee, mois):
+    supabase = get_supabase()
     if not supabase:
         envoyer_whatsapp(expediteur, "Base non disponible.")
         return True
@@ -757,6 +780,7 @@ def envoyer_stats_mois(expediteur, annee, mois):
 # ============================================================
 
 def generer_rapport_hebdo():
+    supabase = get_supabase()
     if not supabase:
         print("==> Supabase non configure")
         return
@@ -802,12 +826,17 @@ Genere rapport WhatsApp concis:
 4. Score sante (0-100)
 5. Decisions urgentes"""
 
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=800
-        )
-        rapport = response.choices[0].message.content
+        groq_client = get_groq_client()
+        if groq_client:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=800,
+                timeout=15
+            )
+            rapport = response.choices[0].message.content
+        else:
+            rapport = f"Rapport semaine {datetime.now().isocalendar()[1]}\n\nTotal: {total} risques\nScore moyen: {moy_score:.1f}/25\nBloquants: {bloquants}"
         
         supabase.table("rapports_hebdo").insert({
             "semaine": datetime.now().isocalendar()[1],
@@ -837,6 +866,7 @@ Genere rapport WhatsApp concis:
 # ============================================================
 
 def verifier_escalades_en_attente():
+    supabase = get_supabase()
     if not supabase:
         return
     
@@ -916,6 +946,7 @@ def recevoir_message():
                     expediteur = msg["from"]
                     
                     if emoji in ["👍", "✅", "🆗"]:
+                        supabase = get_supabase()
                         if supabase:
                             result = supabase.table("risques").select("risque_id").eq("message_id_whatsapp", msg_id).execute()
                             if result.data:
@@ -998,8 +1029,9 @@ def recevoir_message():
 
 @app.route("/test-db")
 def test_db():
+    supabase = get_supabase()
     if not supabase:
-        return "Supabase non configuré", 500
+        return "Supabase non configure", 500
     try:
         result = supabase.table("risques").select("count", count="exact").execute()
         count = result.count if hasattr(result, 'count') else "OK"
@@ -1009,8 +1041,9 @@ def test_db():
 
 @app.route("/test-insert")
 def test_insert():
+    supabase = get_supabase()
     if not supabase:
-        return "Supabase non configuré", 500
+        return "Supabase non configure", 500
     try:
         risque_id = generer_risque_id("RAN")
         data = {
@@ -1027,7 +1060,7 @@ def test_insert():
             "owner_contact": "+2250101089251"
         }
         result = supabase.table("risques").insert(data).execute()
-        return f"Risque créé: {risque_id}", 200
+        return f"Risque cree: {risque_id}", 200
     except Exception as e:
         return f"Erreur: {str(e)}", 500
 
