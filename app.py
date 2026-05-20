@@ -185,9 +185,6 @@ def get_astreinte(role):
 # ============================================================
 
 def envoyer_whatsapp(numero, message, message_id_reference=None):
-    # NE PAS normaliser - utiliser le numéro tel quel
-    # Le webhook envoie "22558337112" sans +
-    
     if WA_TOKEN == "placeholder" or not WA_TOKEN:
         print(f"==> [SIMULATION] WhatsApp a {numero}: {message[:50]}...")
         return None
@@ -204,12 +201,17 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
     data = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
-        "to": numero,  # Utiliser tel quel, sans ajouter de +
+        "to": numero,
         "type": "text",
         "text": {"body": message}
     }
+    
+    # CRUCIAL : Repondre au message, pas envoyer un nouveau
     if message_id_reference:
         data["context"] = {"message_id": message_id_reference}
+        print(f"==> Reponse au message: {message_id_reference}")
+    else:
+        print(f"==> NOUVEAU MESSAGE (peut etre refuse par limite)")
     
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=10)
@@ -315,7 +317,7 @@ Ne mets rien d'autre que le JSON."""
 # CONVERSATION INTERACTIVE
 # ============================================================
 
-def envoyer_formulaire_etape(numero, etape, data=None):
+def envoyer_formulaire_etape(numero, etape, data=None, message_id=None):
     messages = {
         0: (
             "DigitalRiskPlatform\n\n"
@@ -372,7 +374,7 @@ def envoyer_formulaire_etape(numero, etape, data=None):
     else:
         msg = messages.get(etape, "Etape inconnue.")
     
-    envoyer_whatsapp(numero, msg)
+    envoyer_whatsapp(numero, msg, message_id)
 
 def traiter_etape_conversation(expediteur, message, message_id):
     msg_upper = message.strip().upper()
@@ -382,11 +384,11 @@ def traiter_etape_conversation(expediteur, message, message_id):
         if not msg_upper.startswith("#"):
             envoyer_whatsapp(expediteur, 
                 "Pour signaler un risque, votre message doit commencer par #\n\n"
-                "Envoyez # pour commencer.")
+                "Envoyez # pour commencer.", message_id)
             return True
         
         conversations[expediteur] = {"etape": 1, "data": {}}
-        envoyer_formulaire_etape(expediteur, 1)
+        envoyer_formulaire_etape(expediteur, 1, message_id=message_id)
         return True
     
     conv = conversations[expediteur]
@@ -403,33 +405,33 @@ def traiter_etape_conversation(expediteur, message, message_id):
         
         if not type_proj:
             envoyer_whatsapp(expediteur, 
-                "Non reconnu. Choisissez: RAN, RURAL, FIBRE, CORE, IPRAN, MWV, MMONEY, HOME, AUTRES")
+                "Non reconnu. Choisissez: RAN, RURAL, FIBRE, CORE, IPRAN, MWV, MMONEY, HOME, AUTRES", message_id)
             return True
         
         data["type_projet"] = type_proj
         conv["etape"] = 2
-        envoyer_formulaire_etape(expediteur, 2)
+        envoyer_formulaire_etape(expediteur, 2, message_id=message_id)
         return True
     
     # Etape 2: Nom projet
     elif etape == 2:
         data["nom_projet"] = message.strip()
         conv["etape"] = 3
-        envoyer_formulaire_etape(expediteur, 3)
+        envoyer_formulaire_etape(expediteur, 3, message_id=message_id)
         return True
     
     # Etape 3: Site
     elif etape == 3:
         data["site"] = message.strip()
         conv["etape"] = 4
-        envoyer_formulaire_etape(expediteur, 4)
+        envoyer_formulaire_etape(expediteur, 4, message_id=message_id)
         return True
     
     # Etape 4: Description
     elif etape == 4:
         data["description"] = message.strip()
         conv["etape"] = 5
-        envoyer_formulaire_etape(expediteur, 5, data)
+        envoyer_formulaire_etape(expediteur, 5, data, message_id=message_id)
         return True
     
     # Etape 5: Confirmation
@@ -438,20 +440,19 @@ def traiter_etape_conversation(expediteur, message, message_id):
             return traiter_risque_confirme(expediteur, data, message_id)
         elif msg_upper in ["ANNULER", "NON", "RESET"]:
             del conversations[expediteur]
-            envoyer_whatsapp(expediteur, "Annule. Envoyez # pour recommencer.")
+            envoyer_whatsapp(expediteur, "Annule. Envoyez # pour recommencer.", message_id)
             return True
         else:
-            envoyer_whatsapp(expediteur, "Repondez OK ou ANNULER.")
+            envoyer_whatsapp(expediteur, "Repondez OK ou ANNULER.", message_id)
             return True
     
     return False
 
 def traiter_risque_confirme(expediteur, data, message_id):
-    envoyer_whatsapp(expediteur, "Analyse IA en cours... Patientez.")
+    envoyer_whatsapp(expediteur, "Analyse IA en cours... Patientez.", message_id)
     
     analyse = analyser_risque_ia(data["description"], data["site"], data["type_projet"])
     
-    # Generer ID XXXAAMM0000
     risque_id = generer_risque_id(data["type_projet"])
     
     db_data = {
@@ -474,15 +475,13 @@ def traiter_risque_confirme(expediteur, data, message_id):
     success = sauvegarder_risque_complet(db_data, message_id)
     
     if not success:
-        envoyer_whatsapp(expediteur, "Erreur sauvegarde. Reessayez avec #.")
+        envoyer_whatsapp(expediteur, "Erreur sauvegarde. Reessayez avec #.", message_id)
         return True
     
-    # Recuperer pour avoir score_global et priorite calcules
     risque_complet = recuperer_risque_par_id(risque_id)
     score_global = risque_complet.get("score_global", 15) if risque_complet else 15
     priorite = risque_complet.get("priorite", "ELEVE") if risque_complet else "ELEVE"
     
-    # Feedback technicien
     feedback = (
         f"RISQUE ENREGISTRE - {risque_id}\n\n"
         f"Projet: {data['type_projet']}\n"
@@ -503,13 +502,11 @@ def traiter_risque_confirme(expediteur, data, message_id):
         f"Pour fermer ce risque, envoyez:\n"
         f"CLOSE {risque_id}"
     )
-    envoyer_whatsapp(expediteur, feedback)
+    envoyer_whatsapp(expediteur, feedback, message_id)
     
-    # Nettoyer conversation
     if expediteur in conversations:
         del conversations[expediteur]
     
-    # Alertes managers
     destinataires = ESCALADE.get(priorite, [])
     if destinataires:
         alerte = (
@@ -534,7 +531,7 @@ def traiter_risque_confirme(expediteur, data, message_id):
         for role in destinataires:
             astreinte = get_astreinte(role)
             if astreinte and astreinte.get("telephone"):
-                envoyer_whatsapp(astreinte["telephone"], alerte)
+                envoyer_whatsapp(astreinte["telephone"], alerte, message_id)
     
     return True
 
@@ -542,21 +539,20 @@ def traiter_risque_confirme(expediteur, data, message_id):
 # COMMANDES MANAGER
 # ============================================================
 
-def traiter_commande_manager(expediteur, message):
+def traiter_commande_manager(expediteur, message, message_id=None):
     msg_upper = message.strip().upper()
     
-    # CLOSE XXXAAMM0000
     match_close = re.match(r'^(CLOSE|CLOSED)\s+([A-Z]{3}\d{8})$', msg_upper)
     if match_close:
         risque_id = match_close.group(2)
         risque = recuperer_risque_par_id(risque_id)
         
         if not risque:
-            envoyer_whatsapp(expediteur, f"Risque {risque_id} introuvable.")
+            envoyer_whatsapp(expediteur, f"Risque {risque_id} introuvable.", message_id)
             return True
         
         if risque.get("statut") == "CLOSED":
-            envoyer_whatsapp(expediteur, f"{risque_id} deja ferme.")
+            envoyer_whatsapp(expediteur, f"{risque_id} deja ferme.", message_id)
             return True
         
         fermer_risque(risque_id, "Fermeture via commande WhatsApp", expediteur)
@@ -565,21 +561,20 @@ def traiter_commande_manager(expediteur, message):
             f"Risque {risque_id} ferme.\n"
             f"Nom: {risque.get('nom_projet')}\n"
             f"Site: {risque.get('site')}\n"
-            f"Date: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+            f"Date: {datetime.now().strftime('%d/%m/%Y %H:%M')}", message_id)
         
         envoyer_whatsapp(risque.get("source_stakeholder_contact"),
             f"Votre signalement {risque_id} a ete ferme.\n"
-            f"Merci pour votre vigilance.")
+            f"Merci pour votre vigilance.", message_id)
         return True
     
-    # STATUS XXXAAMM0000
     match_status = re.match(r'^STATUS\s+([A-Z]{3}\d{8})$', msg_upper)
     if match_status:
         risque_id = match_status.group(1)
         risque = recuperer_risque_par_id(risque_id)
         
         if not risque:
-            envoyer_whatsapp(expediteur, f"{risque_id} introuvable.")
+            envoyer_whatsapp(expediteur, f"{risque_id} introuvable.", message_id)
             return True
         
         envoyer_whatsapp(expediteur,
@@ -590,7 +585,7 @@ def traiter_commande_manager(expediteur, message):
             f"Score: {risque.get('score_global')}/25\n"
             f"Statut: {risque.get('statut')}\n"
             f"Owner: {risque.get('owner_nom') or risque.get('owner_contact')}\n"
-            f"Date: {str(risque.get('date_identification', ''))[:16]}")
+            f"Date: {str(risque.get('date_identification', ''))[:16]}", message_id)
         return True
     
     return False
@@ -599,10 +594,9 @@ def traiter_commande_manager(expediteur, message):
 # RECHERCHE PAR PERIODE
 # ============================================================
 
-def traiter_recherche_periode(expediteur, message):
+def traiter_recherche_periode(expediteur, message, message_id=None):
     msg_upper = message.strip().upper()
     
-    # LISTE MAI [2026]
     match_liste = re.match(r'^LISTE\s+([A-ZÉÈÊ]+)(?:\s+(\d{4}))?$', msg_upper)
     if match_liste:
         mois_str = match_liste.group(1)
@@ -618,17 +612,16 @@ def traiter_recherche_periode(expediteur, message):
         }
         
         if mois_str.isdigit():
-            return envoyer_liste_annee(expediteur, int(mois_str))
+            return envoyer_liste_annee(expediteur, int(mois_str), message_id)
         
         mois = mois_map.get(mois_str)
         if not mois:
-            envoyer_whatsapp(expediteur, "Mois non reconnu.")
+            envoyer_whatsapp(expediteur, "Mois non reconnu.", message_id)
             return True
         
         annee = int(annee_str) if annee_str else datetime.now().year
-        return envoyer_liste_mois(expediteur, annee, mois)
+        return envoyer_liste_mois(expediteur, annee, mois, message_id)
     
-    # STATS MAI [2026]
     match_stats = re.match(r'^STATS\s+([A-ZÉÈÊ]+)(?:\s+(\d{4}))?$', msg_upper)
     if match_stats:
         mois_str = match_stats.group(1)
@@ -644,23 +637,23 @@ def traiter_recherche_periode(expediteur, message):
         }
         
         if mois_str.isdigit():
-            envoyer_whatsapp(expediteur, "Pour stats annuelles: STATS 2026")
+            envoyer_whatsapp(expediteur, "Pour stats annuelles: STATS 2026", message_id)
             return True
         
         mois = mois_map.get(mois_str)
         if not mois:
-            envoyer_whatsapp(expediteur, "Mois non reconnu.")
+            envoyer_whatsapp(expediteur, "Mois non reconnu.", message_id)
             return True
         
         annee = int(annee_str) if annee_str else datetime.now().year
-        return envoyer_stats_mois(expediteur, annee, mois)
+        return envoyer_stats_mois(expediteur, annee, mois, message_id)
     
     return False
 
-def envoyer_liste_mois(expediteur, annee, mois):
+def envoyer_liste_mois(expediteur, annee, mois, message_id=None):
     supabase = get_supabase()
     if not supabase:
-        envoyer_whatsapp(expediteur, "Base non disponible.")
+        envoyer_whatsapp(expediteur, "Base non disponible.", message_id)
         return True
     
     aa = str(annee)[-2:]
@@ -672,7 +665,7 @@ def envoyer_liste_mois(expediteur, annee, mois):
         risques = result.data if result.data else []
         
         if not risques:
-            envoyer_whatsapp(expediteur, f"Aucun risque pour {mois:02d}/{annee}.")
+            envoyer_whatsapp(expediteur, f"Aucun risque pour {mois:02d}/{annee}.", message_id)
             return True
         
         msg = f"RISQUES {mois:02d}/{annee} ({len(risques)}):\n\n"
@@ -687,18 +680,18 @@ def envoyer_liste_mois(expediteur, annee, mois):
             msg += f"... et {len(risques) - 10} autres.\n"
         
         msg += f"Dashboard: {LIEN_DASHBOARD}"
-        envoyer_whatsapp(expediteur, msg)
+        envoyer_whatsapp(expediteur, msg, message_id)
         return True
         
     except Exception as e:
         print(f"==> Erreur liste mois: {e}")
-        envoyer_whatsapp(expediteur, "Erreur recuperation.")
+        envoyer_whatsapp(expediteur, "Erreur recuperation.", message_id)
         return True
 
-def envoyer_liste_annee(expediteur, annee):
+def envoyer_liste_annee(expediteur, annee, message_id=None):
     supabase = get_supabase()
     if not supabase:
-        envoyer_whatsapp(expediteur, "Base non disponible.")
+        envoyer_whatsapp(expediteur, "Base non disponible.", message_id)
         return True
     
     try:
@@ -707,7 +700,7 @@ def envoyer_liste_annee(expediteur, annee):
         risques = result.data if result.data else []
         
         if not risques:
-            envoyer_whatsapp(expediteur, f"Aucun risque pour {annee}.")
+            envoyer_whatsapp(expediteur, f"Aucun risque pour {annee}.", message_id)
             return True
         
         par_mois = {}
@@ -724,18 +717,18 @@ def envoyer_liste_annee(expediteur, annee):
             msg += f"Mois {mm}: {len(mois_risques)} ({critiques} critiques)\n"
         
         msg += f"\nDashboard: {LIEN_DASHBOARD}"
-        envoyer_whatsapp(expediteur, msg)
+        envoyer_whatsapp(expediteur, msg, message_id)
         return True
         
     except Exception as e:
         print(f"==> Erreur liste annee: {e}")
-        envoyer_whatsapp(expediteur, "Erreur recuperation.")
+        envoyer_whatsapp(expediteur, "Erreur recuperation.", message_id)
         return True
 
-def envoyer_stats_mois(expediteur, annee, mois):
+def envoyer_stats_mois(expediteur, annee, mois, message_id=None):
     supabase = get_supabase()
     if not supabase:
-        envoyer_whatsapp(expediteur, "Base non disponible.")
+        envoyer_whatsapp(expediteur, "Base non disponible.", message_id)
         return True
     
     try:
@@ -743,7 +736,7 @@ def envoyer_stats_mois(expediteur, annee, mois):
         stats = result.data[0] if result.data else None
         
         if not stats:
-            envoyer_whatsapp(expediteur, f"Stats non dispos pour {mois:02d}/{annee}.")
+            envoyer_whatsapp(expediteur, f"Stats non dispos pour {mois:02d}/{annee}.", message_id)
             return True
         
         msg = (
@@ -761,12 +754,12 @@ def envoyer_stats_mois(expediteur, annee, mois):
                 msg += f"  {prio}: {par_prio[prio]}\n"
         
         msg += f"\nDashboard: {LIEN_DASHBOARD}"
-        envoyer_whatsapp(expediteur, msg)
+        envoyer_whatsapp(expediteur, msg, message_id)
         return True
         
     except Exception as e:
         print(f"==> Erreur stats mois: {e}")
-        envoyer_whatsapp(expediteur, "Erreur stats.")
+        envoyer_whatsapp(expediteur, "Erreur stats.", message_id)
         return True
 
 # ============================================================
@@ -949,11 +942,11 @@ def recevoir_message():
                                     "statut": "ASSIGNED",
                                     "owner_contact": expediteur
                                 })
-                                envoyer_whatsapp(expediteur, f"Risque {rid} - Pris en charge.")
+                                envoyer_whatsapp(expediteur, f"Risque {rid} - Pris en charge.", msg_id)
                         return jsonify({"status": "pris_en_charge"})
                     
                     elif emoji in ["⬆️", "🔴", "⚠️"]:
-                        envoyer_whatsapp(expediteur, "Escalade notee.")
+                        envoyer_whatsapp(expediteur, "Escalade notee.", msg_id)
                         return jsonify({"status": "escalade"})
         
         # Messages textes
@@ -972,19 +965,20 @@ def recevoir_message():
         
         print(f"==> Message: {message}")
         print(f"==> Expediteur: {expediteur}")
+        print(f"==> Message ID: {msg_id}")
         
         # Commandes manager (CLOSE, STATUS)
-        if traiter_commande_manager(expediteur, message):
+        if traiter_commande_manager(expediteur, message, msg_id):
             return jsonify({"status": "commande_manager"})
         
         # Recherche periode (LISTE, STATS)
-        if traiter_recherche_periode(expediteur, message):
+        if traiter_recherche_periode(expediteur, message, msg_id):
             return jsonify({"status": "recherche_periode"})
         
         # Commandes generales
         cmd = message.strip().upper()
         if cmd in ["RAPPORT", "DASHBOARD", "STATS"]:
-            envoyer_whatsapp(expediteur, f"Dashboard: {LIEN_DASHBOARD}")
+            envoyer_whatsapp(expediteur, f"Dashboard: {LIEN_DASHBOARD}", msg_id)
             return jsonify({"status": "ok"})
         
         if cmd in ["AIDE", "HELP", "MENU"]:
@@ -1001,7 +995,7 @@ def recevoir_message():
                 "STATUS XXXAAMM0000 - Voir statut\n\n"
                 "GENERAL:\n"
                 "RAPPORT - Dashboard\n"
-                "AIDE - Ce menu")
+                "AIDE - Ce menu", msg_id)
             return jsonify({"status": "ok"})
         
         # Formulaire interactif
@@ -1060,11 +1054,11 @@ def test_insert():
 
 @app.route("/test-whatsapp")
 def test_whatsapp():
-    """Test direct de l'envoi WhatsApp"""
+    """Test direct de l'envoi WhatsApp - NE FONCTIONNE PAS avec numero de test (limite 5 msg/jour)"""
     result = envoyer_whatsapp("22558337112", "Test de connexion DigitalRiskPlatform")
     if result:
         return f"Message envoye avec ID: {result}", 200
-    return "Echec envoi - verifiez WA_TOKEN et WA_PHONE_ID", 500
+    return "Echec envoi - verifiez WA_TOKEN et WA_PHONE_ID, ou limite de messages atteinte", 500
 
 # ============================================================
 # DEMARRAGE
