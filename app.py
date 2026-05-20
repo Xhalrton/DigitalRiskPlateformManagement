@@ -185,9 +185,8 @@ def get_astreinte(role):
 # ============================================================
 
 def envoyer_whatsapp(numero, message, message_id_reference=None):
-    # Normaliser le numéro (ajouter + si manquant)
-    if not numero.startswith('+'):
-        numero = '+' + numero
+    # NE PAS normaliser - utiliser le numéro tel quel
+    # Le webhook envoie "22558337112" sans +
     
     if WA_TOKEN == "placeholder" or not WA_TOKEN:
         print(f"==> [SIMULATION] WhatsApp a {numero}: {message[:50]}...")
@@ -205,7 +204,7 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
     data = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
-        "to": numero,
+        "to": numero,  # Utiliser tel quel, sans ajouter de +
         "type": "text",
         "text": {"body": message}
     }
