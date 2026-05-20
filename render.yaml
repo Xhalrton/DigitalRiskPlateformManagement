@@ -12,7 +12,13 @@ services:
         sync: false
       - key: WA_TOKEN
         sync: false
+      - key: WA_PHONE_ID
+        sync: false
+      - key: WA_APP_SECRET
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
+        sync: false
+      - key: DASHBOARD_URL
         sync: false
