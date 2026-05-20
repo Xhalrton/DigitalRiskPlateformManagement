@@ -63,16 +63,6 @@ LIEN_DASHBOARD = os.environ.get("DASHBOARD_URL", "https://google.com")
 
 conversations = {}
 
-"""
-ETAPES:
-0: Attente "#"
-1: Attente type_projet
-2: Attente nom_projet
-3: Attente site
-4: Attente description risque
-5: Attente confirmation
-"""
-
 # ============================================================
 # SECURITE
 # ============================================================
@@ -93,7 +83,6 @@ def verifier_signature(request):
 # ============================================================
 
 def get_prefix(type_projet):
-    """Recupere le prefix personnalise depuis Supabase ou defaut"""
     supabase = get_supabase()
     if not supabase:
         return type_projet[:3].upper()
@@ -106,11 +95,6 @@ def get_prefix(type_projet):
     return type_projet[:3].upper()
 
 def generer_risque_id(type_projet):
-    """
-    Genere ID format XXXAAMM0000
-    3 caracteres prefix + 2 annee + 2 mois + 4 sequence
-    Ex: RAN26050001, FIB26050142
-    """
     prefix = get_prefix(type_projet)
     now = datetime.now()
     aa = str(now.year)[-2:]
@@ -201,8 +185,16 @@ def get_astreinte(role):
 # ============================================================
 
 def envoyer_whatsapp(numero, message, message_id_reference=None):
-    if WA_TOKEN == "placeholder":
+    # Normaliser le numéro (ajouter + si manquant)
+    if not numero.startswith('+'):
+        numero = '+' + numero
+    
+    if WA_TOKEN == "placeholder" or not WA_TOKEN:
         print(f"==> [SIMULATION] WhatsApp a {numero}: {message[:50]}...")
+        return None
+    
+    if WA_PHONE_ID == "placeholder" or not WA_PHONE_ID:
+        print(f"==> [ERREUR] WA_PHONE_ID non configure")
         return None
     
     url = f"https://graph.facebook.com/v18.0/{WA_PHONE_ID}/messages"
@@ -212,6 +204,7 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
     }
     data = {
         "messaging_product": "whatsapp",
+        "recipient_type": "individual",
         "to": numero,
         "type": "text",
         "text": {"body": message}
@@ -222,6 +215,8 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=10)
         print(f"==> WhatsApp a {numero}: {resp.status_code}")
+        if resp.status_code != 200:
+            print(f"==> ERREUR: {resp.text}")
         return resp.json().get("messages", [{}])[0].get("id")
     except Exception as e:
         print(f"==> Erreur envoi: {e}")
@@ -1063,6 +1058,14 @@ def test_insert():
         return f"Risque cree: {risque_id}", 200
     except Exception as e:
         return f"Erreur: {str(e)}", 500
+
+@app.route("/test-whatsapp")
+def test_whatsapp():
+    """Test direct de l'envoi WhatsApp"""
+    result = envoyer_whatsapp("22558337112", "Test de connexion DigitalRiskPlatform")
+    if result:
+        return f"Message envoye avec ID: {result}", 200
+    return "Echec envoi - verifiez WA_TOKEN et WA_PHONE_ID", 500
 
 # ============================================================
 # DEMARRAGE
