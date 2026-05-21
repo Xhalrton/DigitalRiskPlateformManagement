@@ -28,9 +28,9 @@ WA_APP_SECRET = os.environ.get("WA_APP_SECRET", "placeholder")
 SUPABASE_URL  = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY  = os.environ.get("SUPABASE_KEY")
 
-# Contacts de test (fallback si pas d'astreinte en base)
+# Contacts de l'équipe (fallback si pas d'astreinte en base)
 CONTACTS = {
-    "CHEF_PROJET": "+2250101089251",
+    "CHEF_PROJET": "+2250500277071",
     "PMO":         "+2250555444241",
     "DIRECTEUR":   "+2250506574905"
 }
