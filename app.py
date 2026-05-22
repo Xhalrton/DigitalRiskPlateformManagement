@@ -899,6 +899,348 @@ def envoyer_risques_par_site(expediteur, site, message_id=None):
         envoyer_whatsapp(expediteur, "❌ Erreur récupération.", message_id)
         return True
 
+# ============================================================
+# COMMANDE STAT — Tableau de bord par rôle
+# ============================================================
+
+def get_role_utilisateur(telephone):
+    """Récupère le rôle d'un utilisateur à partir de son numéro WhatsApp."""
+    supabase = get_supabase()
+    if not supabase:
+        return None
+    try:
+        result = supabase.table("utilisateurs").select("role, nom, prenom").eq("telephone", telephone).eq("actif", True).execute()
+        if result.data:
+            u = result.data[0]
+            return {
+                "role": u.get("role", "SIGNALANT"),
+                "nom": f"{u.get('prenom', '')} {u['nom']}".strip()
+            }
+    except Exception as e:
+        print(f"==> Erreur récupération rôle: {e}")
+    return None
+
+def traiter_stat(expediteur, message, message_id=None):
+    """Traite les commandes STAT et variantes."""
+    msg_upper = message.strip().upper()
+
+    # Patterns reconnus
+    match_stat_global = re.match(r'^STAT$', msg_upper)
+    match_stat_moi = re.match(r'^STAT\s+MOI$', msg_upper)
+    match_stat_statut = re.match(r'^STAT\s+(OPENED|ASSIGNED|IN_PROGRESS|RESOLVED|CLOSED)$', msg_upper)
+    match_stat_priorite = re.match(r'^STAT\s+(CRITIQUE|ELEVE|MOYEN|FAIBLE)$', msg_upper)
+    match_stat_bloquants = re.match(r'^STAT\s+BLOQUANTS$', msg_upper)
+    match_stat_semaine = re.match(r'^STAT\s+SEMAINE$', msg_upper)
+    match_stat_mois = re.match(r'^STAT\s+(\d{2}|JANVIER|FEVRIER|MARS|AVRIL|MAI|JUIN|JUILLET|AOUT|SEPTEMBRE|OCTOBRE|NOVEMBRE|DECEMBRE)$', msg_upper)
+    match_stat_projet = re.match(r'^STAT\s+PROJET\s+([A-Z]+)$', msg_upper)
+    match_stat_site = re.match(r'^STAT\s+SITE\s+(.+)$', msg_upper)
+    match_stat_7j = re.match(r'^STAT\s+7J$', msg_upper)
+    match_stat_detail = re.match(r'^STAT\s+DETAIL$', msg_upper)
+
+    if not any([match_stat_global, match_stat_moi, match_stat_statut, match_stat_priorite,
+                match_stat_bloquants, match_stat_semaine, match_stat_mois, match_stat_projet,
+                match_stat_site, match_stat_7j, match_stat_detail]):
+        return False
+
+    # Récupérer le rôle de l'utilisateur
+    user_info = get_role_utilisateur(expediteur)
+    role = user_info.get("role", "SIGNALANT") if user_info else "SIGNALANT"
+    nom_user = user_info.get("nom", "Utilisateur") if user_info else "Utilisateur"
+
+    # Déterminer le type de requête
+    requete_type = "global"
+    filtre = None
+
+    if match_stat_moi:
+        requete_type = "moi"
+    elif match_stat_statut:
+        requete_type = "statut"
+        filtre = match_stat_statut.group(1)
+    elif match_stat_priorite:
+        requete_type = "priorite"
+        filtre = match_stat_priorite.group(1)
+    elif match_stat_bloquants:
+        requete_type = "bloquants"
+    elif match_stat_semaine:
+        requete_type = "semaine"
+    elif match_stat_mois:
+        requete_type = "mois"
+        filtre = match_stat_mois.group(1)
+    elif match_stat_projet:
+        requete_type = "projet"
+        filtre = match_stat_projet.group(1)
+    elif match_stat_site:
+        requete_type = "site"
+        filtre = match_stat_site.group(1)
+    elif match_stat_7j:
+        requete_type = "7j"
+    elif match_stat_detail:
+        requete_type = "detail"
+
+    # Construire et exécuter la requête
+    return executer_stat(expediteur, nom_user, role, requete_type, filtre, message_id)
+
+def executer_stat(expediteur, nom_user, role, requete_type, filtre, message_id):
+    """Exécute la requête STAT et formate la réponse."""
+    supabase = get_supabase()
+    if not supabase:
+        envoyer_whatsapp(expediteur, "❌ Base de données non disponible.", message_id)
+        return True
+
+    try:
+        # Construire la requête de base selon le rôle
+        query = supabase.table("risques").select("*")
+
+        # Filtrage par rôle
+        if role == "SIGNALANT":
+            # Le signalant ne voit que ses propres risques (signalés ou assignés)
+            query = query.or_(f"source_stakeholder_contact.eq.{expediteur},owner_contact.eq.{expediteur}")
+        # CHEF_PROJET, PMO, DIRECTEUR voient tout (pas de filtre supplémentaire)
+
+        # Appliquer les filtres de requête
+        if requete_type == "moi":
+            query = query.or_(f"source_stakeholder_contact.eq.{expediteur},owner_contact.eq.{expediteur}")
+        elif requete_type == "statut" and filtre:
+            query = query.eq("statut", filtre)
+        elif requete_type == "priorite" and filtre:
+            query = query.eq("priorite", filtre)
+        elif requete_type == "bloquants":
+            query = query.eq("bloque_projet", True)
+        elif requete_type == "semaine":
+            debut_semaine = (datetime.now() - timedelta(days=datetime.now().weekday())).isoformat()
+            query = query.gte("date_identification", debut_semaine)
+        elif requete_type == "7j":
+            debut_7j = (datetime.now() - timedelta(days=7)).isoformat()
+            query = query.gte("date_identification", debut_7j)
+        elif requete_type == "mois" and filtre:
+            # Gérer les mois par nom ou numéro
+            mois_map = {
+                'JANVIER': '01', 'FEVRIER': '02', 'MARS': '03', 'AVRIL': '04',
+                'MAI': '05', 'JUIN': '06', 'JUILLET': '07', 'AOUT': '08',
+                'SEPTEMBRE': '09', 'OCTOBRE': '10', 'NOVEMBRE': '11', 'DECEMBRE': '12'
+            }
+            mois_num = mois_map.get(filtre, filtre)
+            aa = str(datetime.now().year)[-2:]
+            query = query.like("risque_id", f"___{aa}{mois_num}%")
+        elif requete_type == "projet" and filtre:
+            query = query.eq("type_projet", filtre)
+        elif requete_type == "site" and filtre:
+            query = query.ilike("site", f"%{filtre}%")
+
+        # Toujours exclure les très vieux CLOSED sauf demande explicite
+        if requete_type not in ["statut"] or filtre != "CLOSED":
+            query = query.or_("statut.neq.CLOSED,date_resolution.gte." + (datetime.now() - timedelta(days=30)).isoformat())
+
+        # Exécuter la requête
+        result = query.order("date_identification", desc=True).limit(50).execute()
+        risques = result.data if result.data else []
+
+        if not risques:
+            envoyer_whatsapp(expediteur, 
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📊 STATISTIQUES\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "ℹ️ Aucun risque trouvé pour cette requête.", message_id)
+            return True
+
+        # Calculer les KPI
+        total = len(risques)
+        par_priorite = {}
+        par_statut = {}
+        par_type = {}
+        bloquants = 0
+        total_score = 0
+
+        for r in risques:
+            p = r.get("priorite", "MOYEN")
+            par_priorite[p] = par_priorite.get(p, 0) + 1
+            s = r.get("statut", "OPENED")
+            par_statut[s] = par_statut.get(s, 0) + 1
+            t = r.get("type_projet", "AUTRES")
+            par_type[t] = par_type.get(t, 0) + 1
+            if r.get("bloque_projet"):
+                bloquants += 1
+            total_score += r.get("score_global", 0) or 0
+
+        moyenne_score = total_score / total if total else 0
+
+        # Construire le message compact
+        emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}
+        emoji_statut = {"OPENED": "🔴", "ASSIGNED": "🟠", "IN_PROGRESS": "🔵", "RESOLVED": "🟢", "CLOSED": "⚫"}
+
+        # En-tête avec info utilisateur
+        vue_info = ""
+        if role == "SIGNALANT":
+            vue_info = " (vue perso)"
+        elif role in ["CHEF_PROJET", "PMO", "DIRECTEUR"]:
+            vue_info = f" ({role})"
+
+        msg = (
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 STAT{vue_info}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 {nom_user}\n"
+            f"📈 {total} risque(s) | 💥 {bloquants} bloquant(s)\n"
+            f"📊 Score moyen: {moyenne_score:.1f}/25\n\n"
+        )
+
+        # Répartition par priorité (ligne compacte)
+        msg += "PRIORITÉS: "
+        prio_parts = []
+        for prio in ["CRITIQUE", "ELEVE", "MOYEN", "FAIBLE"]:
+            if prio in par_priorite:
+                prio_parts.append(f"{emoji_priorite[prio]} {par_priorite[prio]}")
+        msg += " | ".join(prio_parts) + "\n\n"
+
+        # Répartition par statut (ligne compacte)
+        msg += "STATUTS: "
+        stat_parts = []
+        for stat in ["OPENED", "ASSIGNED", "IN_PROGRESS", "RESOLVED", "CLOSED"]:
+            if stat in par_statut:
+                stat_parts.append(f"{emoji_statut[stat]} {par_statut[stat]}")
+        msg += " | ".join(stat_parts) + "\n\n"
+
+        # Top 3 risques les plus récents/critiques
+        msg += "TOP 3:\n"
+        top3 = sorted(risques, key=lambda x: (x.get("score_global", 0), x.get("date_identification", "")), reverse=True)[:3]
+        for i, r in enumerate(top3, 1):
+            ep = emoji_priorite.get(r.get('priorite'), "⚪")
+            es = emoji_statut.get(r.get('statut'), "⚪")
+            nom_signalant = r.get('source_stakeholder_nom_prenom', '') or r.get('source_stakeholder_contact', '?')
+            msg += (
+                f"{i}. {ep}{es} *{r['risque_id']}* | {r.get('type_projet','?')}\n"
+                f"   📍 {str(r.get('site','?')).upper()} | 👤 {nom_signalant}\n"
+            )
+
+        msg += (
+            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Répondez *1* pour les 10 suivants\n"
+            f"Répondez *STAT DETAIL* pour tout voir\n"
+            f"🌐 Dashboard: {LIEN_DASHBOARD}"
+        )
+
+        envoyer_whatsapp(expediteur, msg, message_id)
+
+        # Stocker la session pour la pagination (option 1)
+        if total > 3:
+            set_conversation(expediteur, "stat_pagination", {
+                "requete_type": requete_type,
+                "filtre": filtre,
+                "role": role,
+                "offset": 3,
+                "total": total
+            })
+
+        return True
+
+    except Exception as e:
+        print(f"==> Erreur STAT: {e}")
+        envoyer_whatsapp(expediteur, "❌ Erreur lors de la récupération des statistiques.", message_id)
+        return True
+
+def traiter_stat_pagination(expediteur, message, message_id):
+    """Gère la pagination des résultats STAT (réponse '1' pour voir plus)."""
+    msg_upper = message.strip().upper()
+    if msg_upper != "1":
+        return False
+
+    conv = get_conversation(expediteur)
+    if not conv or conv.get("etape") != "stat_pagination":
+        return False
+
+    data = conv.get("data", {})
+    requete_type = data.get("requete_type", "global")
+    filtre = data.get("filtre")
+    role = data.get("role", "SIGNALANT")
+    offset = data.get("offset", 0)
+    total = data.get("total", 0)
+
+    # Récupérer les risques suivants
+    supabase = get_supabase()
+    if not supabase:
+        return False
+
+    try:
+        query = supabase.table("risques").select("*")
+
+        # Réappliquer les filtres
+        if role == "SIGNALANT":
+            query = query.or_(f"source_stakeholder_contact.eq.{expediteur},owner_contact.eq.{expediteur}")
+
+        if requete_type == "moi":
+            query = query.or_(f"source_stakeholder_contact.eq.{expediteur},owner_contact.eq.{expediteur}")
+        elif requete_type == "statut" and filtre:
+            query = query.eq("statut", filtre)
+        elif requete_type == "priorite" and filtre:
+            query = query.eq("priorite", filtre)
+        elif requete_type == "bloquants":
+            query = query.eq("bloque_projet", True)
+        elif requete_type == "semaine":
+            debut_semaine = (datetime.now() - timedelta(days=datetime.now().weekday())).isoformat()
+            query = query.gte("date_identification", debut_semaine)
+        elif requete_type == "7j":
+            debut_7j = (datetime.now() - timedelta(days=7)).isoformat()
+            query = query.gte("date_identification", debut_7j)
+        elif requete_type == "mois" and filtre:
+            mois_map = {
+                'JANVIER': '01', 'FEVRIER': '02', 'MARS': '03', 'AVRIL': '04',
+                'MAI': '05', 'JUIN': '06', 'JUILLET': '07', 'AOUT': '08',
+                'SEPTEMBRE': '09', 'OCTOBRE': '10', 'NOVEMBRE': '11', 'DECEMBRE': '12'
+            }
+            mois_num = mois_map.get(filtre, filtre)
+            aa = str(datetime.now().year)[-2:]
+            query = query.like("risque_id", f"___{aa}{mois_num}%")
+        elif requete_type == "projet" and filtre:
+            query = query.eq("type_projet", filtre)
+        elif requete_type == "site" and filtre:
+            query = query.ilike("site", f"%{filtre}%")
+
+        if requete_type not in ["statut"] or filtre != "CLOSED":
+            query = query.or_("statut.neq.CLOSED,date_resolution.gte." + (datetime.now() - timedelta(days=30)).isoformat())
+
+        result = query.order("date_identification", desc=True).range(offset, offset + 9).execute()
+        risques = result.data if result.data else []
+
+        if not risques:
+            envoyer_whatsapp(expediteur, "ℹ️ Plus de risques à afficher.", message_id)
+            delete_conversation(expediteur)
+            return True
+
+        emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}
+        emoji_statut = {"OPENED": "🔴", "ASSIGNED": "🟠", "IN_PROGRESS": "🔵", "RESOLVED": "🟢", "CLOSED": "⚫"}
+
+        msg = f"📋 SUIVI ({offset+1}-{offset+len(risques)}/{total})\n\n"
+
+        for i, r in enumerate(risques, offset + 1):
+            ep = emoji_priorite.get(r.get('priorite'), "⚪")
+            es = emoji_statut.get(r.get('statut'), "⚪")
+            nom_signalant = r.get('source_stakeholder_nom_prenom', '') or r.get('source_stakeholder_contact', '?')
+            msg += (
+                f"{i}. {ep}{es} *{r['risque_id']}*\n"
+                f"   📍 {str(r.get('site','?')).upper()} | {r.get('type_projet','?')}\n"
+                f"   👤 {nom_signalant} | 📊 {r.get('score_global','?')}/25\n\n"
+            )
+
+        nouveau_offset = offset + len(risques)
+        if nouveau_offset < total:
+            msg += "Répondez *1* pour continuer\n"
+            set_conversation(expediteur, "stat_pagination", {
+                **data,
+                "offset": nouveau_offset
+            })
+        else:
+            msg += "✅ Fin de la liste\n"
+            delete_conversation(expediteur)
+
+        msg += f"🌐 Dashboard: {LIEN_DASHBOARD}"
+        envoyer_whatsapp(expediteur, msg, message_id)
+        return True
+
+    except Exception as e:
+        print(f"==> Erreur pagination STAT: {e}")
+        return True
+
+
 # Gestion de la session CLOSE avec raison
 def traiter_close_avec_raison(expediteur, message, message_id):
     conv = get_conversation(expediteur)
@@ -1279,6 +1621,14 @@ def recevoir_message():
         if traiter_close_avec_raison(expediteur, message, msg_id):
             return jsonify({"status": "close_raison"})
 
+        # Commande STAT (doit être avant les autres commandes)
+        if traiter_stat(expediteur, message, msg_id):
+            return jsonify({"status": "stat"})
+
+        # Pagination STAT (réponse "1")
+        if traiter_stat_pagination(expediteur, message, msg_id):
+            return jsonify({"status": "stat_pagination"})
+
         # Commandes manager
         if traiter_commande_manager(expediteur, message, msg_id):
             return jsonify({"status": "commande_manager"})
@@ -1300,6 +1650,17 @@ def recevoir_message():
                 "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 "📋 SIGNALER UN RISQUE:\n"
                 "Envoyez *#* pour commencer\n\n"
+                "📊 TABLEAU DE BORD (STAT):\n"
+                "STAT — Vue globale\n"
+                "STAT MOI — Mes risques\n"
+                "STAT OPENED/ASSIGNED/... — Par statut\n"
+                "STAT CRITIQUE/ELEVE/... — Par priorité\n"
+                "STAT BLOQUANTS — Bloquants\n"
+                "STAT SEMAINE — Cette semaine\n"
+                "STAT 7J — 7 derniers jours\n"
+                "STAT MAI/05 — Par mois\n"
+                "STAT PROJET RAN — Par type\n"
+                "STAT SITE COCODY — Par site\n\n"
                 "📊 RECHERCHE:\n"
                 "LISTE MAI [2026] — Risques du mois\n"
                 "LISTE 2026 — Risques de l'année\n"
