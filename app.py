@@ -8,10 +8,6 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from groq import Groq
 from supabase import create_client
-
-# ============================================================
-# CORRECTION 1 : APScheduler pour les escalades temporelles
-# ============================================================
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 
@@ -28,7 +24,6 @@ WA_APP_SECRET = os.environ.get("WA_APP_SECRET", "placeholder")
 SUPABASE_URL  = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY  = os.environ.get("SUPABASE_KEY")
 
-# Contacts de l'équipe (fallback si pas d'astreinte en base)
 CONTACTS = {
     "CHEF_PROJET": "+2250500277071",
     "PMO":         "+2250555444241",
@@ -45,7 +40,8 @@ ESCALADE = {
 TYPES_PROJET = ["RAN", "RURAL", "FIBRE", "CORE", "IPRAN", "MWV", "MMONEY", "HOME", "AUTRES"]
 TYPES_RISQUE = ["ACCES", "SECURITE", "TECHNIQUE", "ADMINISTRATIF", "METEO", "LOGISTIQUE", "SANITAIRE", "SOCIAL", "AUTRES"]
 
-# Clients - initialisation paresseuse
+STATUTS_VALIDES = ["OPENED", "ASSIGNED", "IN_PROGRESS", "RESOLVED", "CLOSED"]
+
 _groq_client = None
 _supabase_client = None
 
@@ -64,19 +60,10 @@ def get_supabase():
 LIEN_DASHBOARD = os.environ.get("DASHBOARD_URL", "https://google.com")
 
 # ============================================================
-# CORRECTION 2 : SUPPRESSION de conversations = {}
-# Les sessions sont désormais persistées dans Supabase (table sessions_wa)
-# Schema requis :
-#   CREATE TABLE sessions_wa (
-#     numero TEXT PRIMARY KEY,
-#     etape  INTEGER NOT NULL DEFAULT 1,
-#     data   JSONB   NOT NULL DEFAULT '{}',
-#     updated_at TIMESTAMPTZ DEFAULT NOW()
-#   );
+# SESSIONS PERSISTANTES
 # ============================================================
 
 def get_conversation(numero):
-    """Récupère la session active depuis Supabase."""
     supabase = get_supabase()
     if not supabase:
         return None
@@ -88,7 +75,6 @@ def get_conversation(numero):
         return None
 
 def set_conversation(numero, etape, data):
-    """Crée ou met à jour la session dans Supabase (upsert)."""
     supabase = get_supabase()
     if not supabase:
         return
@@ -103,7 +89,6 @@ def set_conversation(numero, etape, data):
         print(f"==> Erreur set_conversation: {e}")
 
 def delete_conversation(numero):
-    """Supprime la session d'un utilisateur."""
     supabase = get_supabase()
     if not supabase:
         return
@@ -113,16 +98,10 @@ def delete_conversation(numero):
         print(f"==> Erreur delete_conversation: {e}")
 
 # ============================================================
-# CORRECTION 3 : IDEMPOTENCE — déduplication des webhooks
-# Schema requis :
-#   CREATE TABLE messages_traites (
-#     message_id TEXT PRIMARY KEY,
-#     traite_at  TIMESTAMPTZ DEFAULT NOW()
-#   );
+# IDEMPOTENCE
 # ============================================================
 
 def message_deja_traite(message_id):
-    """Retourne True si ce message_id a déjà été traité."""
     supabase = get_supabase()
     if not supabase:
         return False
@@ -134,7 +113,6 @@ def message_deja_traite(message_id):
         return False
 
 def marquer_message_traite(message_id):
-    """Enregistre le message_id comme traité."""
     supabase = get_supabase()
     if not supabase:
         return
@@ -148,16 +126,11 @@ def marquer_message_traite(message_id):
 # ============================================================
 
 def verifier_signature(req):
-    """
-    CORRECTION 4 : Correction du bug hmac.new() → hmac.new() n'existe pas.
-    La syntaxe correcte est hmac.new(key, msg, digestmod).
-    """
     if not WA_APP_SECRET or WA_APP_SECRET == "placeholder":
         return True
     signature = req.headers.get('X-Hub-Signature-256', '')
     if not signature:
         return False
-    # CORRIGÉ : hmac.new(key_bytes, msg_bytes, digestmod)
     expected = hmac.new(
         WA_APP_SECRET.encode('utf-8'),
         req.get_data(),
@@ -166,7 +139,7 @@ def verifier_signature(req):
     return hmac.compare_digest(f"sha256={expected}", signature)
 
 # ============================================================
-# GENERATION ID : XXXAAMM0000
+# GENERATION ID
 # ============================================================
 
 def get_prefix(type_projet):
@@ -187,7 +160,6 @@ def generer_risque_id(type_projet):
     aa = str(now.year)[-2:]
     mm = f"{now.month:02d}"
     base_prefix = f"{prefix}{aa}{mm}"
-
     supabase = get_supabase()
     if supabase:
         try:
@@ -198,9 +170,7 @@ def generer_risque_id(type_projet):
             count = 0
     else:
         count = 0
-
-    sequence = count + 1
-    return f"{base_prefix}{sequence:04d}"
+    return f"{base_prefix}{count + 1:04d}"
 
 # ============================================================
 # SUPABASE
@@ -244,7 +214,8 @@ def fermer_risque(risque_id, reponse, par_qui):
     return mettre_a_jour_risque(risque_id, {
         "statut": "CLOSED",
         "reponse_apportee": reponse,
-        "owner_contact": par_qui
+        "owner_contact": par_qui,
+        "date_resolution": datetime.now().isoformat()
     })
 
 def get_astreinte(role):
@@ -275,7 +246,6 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
     if WA_TOKEN == "placeholder" or not WA_TOKEN:
         print(f"==> [SIMULATION] WhatsApp a {numero}: {message[:50]}...")
         return None
-
     if WA_PHONE_ID == "placeholder" or not WA_PHONE_ID:
         print(f"==> [ERREUR] WA_PHONE_ID non configure")
         return None
@@ -292,12 +262,8 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
         "type": "text",
         "text": {"body": message}
     }
-
     if message_id_reference:
         data["context"] = {"message_id": message_id_reference}
-        print(f"==> Reponse au message: {message_id_reference}")
-    else:
-        print(f"==> NOUVEAU MESSAGE (peut etre refuse par limite)")
 
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=10)
@@ -310,71 +276,85 @@ def envoyer_whatsapp(numero, message, message_id_reference=None):
         return None
 
 # ============================================================
-# IA
+# AMELIORATION 3 : IA ENRICHIE — analyse en français, plus de détails
 # ============================================================
 
-def analyser_risque_ia(description, site, type_projet):
+def analyser_risque_ia(description, site, type_projet, nom_signalant=""):
     groq_client = get_groq_client()
     if not groq_client:
-        print("==> GROQ non configure, analyse par defaut")
         return {
             "type_risque": "AUTRES",
             "description_risque": description[:100],
-            "impact_risque": "A evaluer",
+            "impact_risque": "À évaluer",
+            "mesures_preventives": "Évaluation sur site requise",
             "score_probabilite_1_5": 3,
             "score_impact_1_5": 3,
             "bloquer_projet": False,
             "strategie_de_reponse": "REDUCTION",
-            "action_immediate": "Evaluation sur site requise",
+            "action_immediate": "Évaluation sur site requise",
+            "action_court_terme": "À définir sous 24h",
+            "action_long_terme": "À planifier",
+            "parties_prenantes": "Équipe projet",
             "confiance": 0.3,
-            "justification_scores": "IA non disponible - defaut"
+            "justification_scores": "IA non disponible - défaut"
         }
 
-    prompt = f"""Tu es un expert en gestion des risques telecoms.
+    prompt = f"""Tu es un expert senior en gestion des risques pour les projets télécoms en Afrique de l'Ouest.
+Tu travailles pour une entreprise de déploiement réseau en Côte d'Ivoire.
+Tu rédiges toujours en FRANÇAIS PARFAIT, professionnel et précis.
 
-CONTEXTE:
-- Projet: {type_projet}
-- Site: {site}
+CONTEXTE DU SIGNALEMENT:
+- Type de projet: {type_projet}
+- Site concerné: {site}
+- Signalé par: {nom_signalant or 'Non renseigné'}
 - Description: "{description}"
-- Date: {datetime.now().isoformat()}
+- Date et heure: {datetime.now().strftime('%d/%m/%Y à %H:%M')}
 
-Evalue ce risque et reponds UNIQUEMENT en JSON:
+Analyse ce risque de manière exhaustive et réponds UNIQUEMENT en JSON valide:
 
 {{
   "type_risque": "ACCES|SECURITE|TECHNIQUE|ADMINISTRATIF|METEO|LOGISTIQUE|SANITAIRE|SOCIAL|AUTRES",
-  "description_risque": "synthese claire",
-  "impact_risque": "impact concret sur operations",
-  "score_probabilite_1_5": 1-5,
-  "score_impact_1_5": 1-5,
-  "bloquer_projet": true|false,
+  "description_risque": "Synthèse claire et professionnelle du risque en 2-3 phrases",
+  "impact_risque": "Description précise de l'impact opérationnel sur le projet et les équipes",
+  "mesures_preventives": "Mesures préventives à mettre en place pour éviter la récurrence",
+  "score_probabilite_1_5": 1,
+  "score_impact_1_5": 1,
+  "bloquer_projet": false,
   "strategie_de_reponse": "EVITEMENT|REDUCTION|TRANSFERT|ACCEPTATION",
-  "action_immediate": "action concrete pour le manager",
-  "confiance": 0.0-1.0,
-  "justification_scores": "15 mots max"
+  "action_immediate": "Action concrète et urgente à réaliser dans l'heure",
+  "action_court_terme": "Action à réaliser dans les 24 à 48 heures",
+  "action_long_terme": "Action stratégique à planifier sur le moyen terme",
+  "parties_prenantes": "Liste des personnes ou entités à impliquer",
+  "confiance": 0.85,
+  "justification_scores": "Justification en 20 mots maximum des scores attribués"
 }}
 
-REGLES SCORING:
-- Probabilite: 1=quasi impossible, 2=peu probable, 3=possible, 4=probable, 5=quasi certain
-- Impact: 1=negligeable, 2=mineur, 3=modere, 4=majeur, 5=catastrophique
+RÈGLES DE SCORING:
+- Probabilité: 1=quasi impossible, 2=peu probable, 3=possible, 4=probable, 5=quasi certain
+- Impact: 1=négligeable, 2=mineur, 3=modéré, 4=majeur, 5=catastrophique
+- Score global = probabilité × impact (max 25)
+- bloquer_projet = true si score >= 15 ou si danger physique immédiat
 
-Ne mets rien d'autre que le JSON."""
+CONSIGNES QUALITÉ:
+- Rédige en français professionnel sans fautes
+- Sois précis et actionnable dans les recommandations
+- Adapte les actions au contexte télécom en Côte d'Ivoire
+- Ne renvoie que le JSON, rien d'autre"""
 
     try:
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            max_tokens=600,
-            timeout=15
+            max_tokens=1000,
+            timeout=20
         )
         result = json.loads(response.choices[0].message.content)
 
         if result.get("type_risque") not in TYPES_RISQUE:
             result["type_risque"] = "AUTRES"
-
         prob = result.get("score_probabilite_1_5")
         imp = result.get("score_impact_1_5")
-
         if not isinstance(prob, int) or not (1 <= prob <= 5):
             result["score_probabilite_1_5"] = 3
         if not isinstance(imp, int) or not (1 <= imp <= 5):
@@ -389,30 +369,43 @@ Ne mets rien d'autre que le JSON."""
         return {
             "type_risque": "AUTRES",
             "description_risque": description[:100],
-            "impact_risque": "A evaluer",
+            "impact_risque": "À évaluer",
+            "mesures_preventives": "Évaluation sur site requise",
             "score_probabilite_1_5": 3,
             "score_impact_1_5": 3,
             "bloquer_projet": False,
             "strategie_de_reponse": "REDUCTION",
-            "action_immediate": "Evaluation sur site requise",
+            "action_immediate": "Évaluation sur site requise",
+            "action_court_terme": "À définir sous 24h",
+            "action_long_terme": "À planifier",
+            "parties_prenantes": "Équipe projet",
             "confiance": 0.3,
-            "justification_scores": "Erreur IA - defaut"
+            "justification_scores": "Erreur IA - défaut"
         }
 
 # ============================================================
-# CONVERSATION INTERACTIVE (sessions persistantes)
+# AMELIORATION 1 : FORMULAIRE 5 ETAPES + messages en majuscules
+# Etape 1 : NOM & PRENOM du signalant (NOUVEAU)
+# Etape 2 : Type de projet
+# Etape 3 : NOM DU PROJET
+# Etape 4 : SITE
+# Etape 5 : DESCRIPTION
+# Etape 6 : Confirmation
 # ============================================================
 
 def envoyer_formulaire_etape(numero, etape, data=None, message_id=None):
     messages = {
-        0: (
-            "DigitalRiskPlatform\n\n"
-            "Pour signaler un risque, envoyez un message commencant par #\n\n"
-            "Exemple: # je veux signaler un risque\n\n"
-            "Ou envoyez simplement # pour commencer."
-        ),
         1: (
-            "Etape 1/4 - Type de projet:\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📋 ETAPE 1/5 — IDENTITE\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Indiquez votre NOM et PRENOM.\n\n"
+            "Exemple: KOUASSI Jean-Baptiste"
+        ),
+        2: (
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📋 ETAPE 2/5 — TYPE DE PROJET\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "1. RAN\n"
             "2. RURAL\n"
             "3. FIBRE\n"
@@ -422,40 +415,47 @@ def envoyer_formulaire_etape(numero, etape, data=None, message_id=None):
             "7. MMONEY\n"
             "8. HOME\n"
             "9. AUTRES\n\n"
-            "Repondez par le numero ou le nom."
-        ),
-        2: (
-            "Etape 2/4 - Nom du projet:\n\n"
-            "Indiquez le nom precis du projet.\n"
-            "Exemple: Deploiement RAN Abidjan Nord\n\n"
-            "Ce nom pourra etre modifie par l'administrateur."
+            "Repondez par le NUMERO ou le NOM."
         ),
         3: (
-            "Etape 3/4 - Site concerne:\n\n"
-            "Indiquez le nom ou code du site.\n"
-            "Exemple: Cocody, ABJ_COC_001"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📋 ETAPE 3/5 — NOM DU PROJET\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Indiquez le NOM PRECIS du projet.\n\n"
+            "Exemple: DEPLOIEMENT RAN ABIDJAN NORD"
         ),
         4: (
-            "Etape 4/4 - Description du risque:\n\n"
-            "Decrivez le risque:\n"
-            "- Quel est le probleme?\n"
-            "- Quand a-t-il commence?\n"
-            "- Personnes en danger?\n"
-            "- Travail bloque?\n\n"
-            "Soyez precis, l'IA analysera votre message."
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📋 ETAPE 4/5 — SITE CONCERNE\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Indiquez le NOM ou CODE du site.\n\n"
+            "Exemple: COCODY, ABJ_COC_001"
         ),
-        5: None
+        5: (
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📋 ETAPE 5/5 — DESCRIPTION DU RISQUE\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Decrivez le risque en detail:\n\n"
+            "• QUEL EST LE PROBLEME ?\n"
+            "• QUAND A-T-IL COMMENCE ?\n"
+            "• PERSONNES EN DANGER ?\n"
+            "• TRAVAUX BLOQUES ?\n\n"
+            "Soyez precis — l'IA analysera votre message."
+        ),
     }
 
-    if etape == 5 and data:
+    if etape == 6 and data:
         msg = (
-            f"Resume de votre signalement:\n\n"
-            f"Projet: {data.get('type_projet', '?')}\n"
-            f"Nom: {data.get('nom_projet', '?')}\n"
-            f"Site: {data.get('site', '?')}\n"
-            f"Description: {data.get('description', '?')[:100]}...\n\n"
-            f"Envoyez OK pour valider et analyser,\n"
-            f"ou ANNULER pour recommencer."
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ RESUME DU SIGNALEMENT\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 SIGNALE PAR : {data.get('nom_signalant', '?').upper()}\n"
+            f"📁 PROJET : {data.get('type_projet', '?')}\n"
+            f"🏗️ NOM : {data.get('nom_projet', '?').upper()}\n"
+            f"📍 SITE : {data.get('site', '?').upper()}\n"
+            f"⚠️ DESCRIPTION : {data.get('description', '?')[:120]}...\n\n"
+            "Envoyez *OK* pour valider et analyser\n"
+            "ou *ANNULER* pour recommencer."
         )
     else:
         msg = messages.get(etape, "Etape inconnue.")
@@ -464,8 +464,6 @@ def envoyer_formulaire_etape(numero, etape, data=None, message_id=None):
 
 def traiter_etape_conversation(expediteur, message, message_id):
     msg_upper = message.strip().upper()
-
-    # Récupération de la session persistante
     conv = get_conversation(expediteur)
 
     # Nouveau signalement
@@ -473,9 +471,8 @@ def traiter_etape_conversation(expediteur, message, message_id):
         if not msg_upper.startswith("#"):
             envoyer_whatsapp(expediteur,
                 "Pour signaler un risque, votre message doit commencer par #\n\n"
-                "Envoyez # pour commencer.", message_id)
+                "Envoyez *#* pour commencer.", message_id)
             return True
-
         set_conversation(expediteur, 1, {})
         envoyer_formulaire_etape(expediteur, 1, message_id=message_id)
         return True
@@ -483,70 +480,93 @@ def traiter_etape_conversation(expediteur, message, message_id):
     etape = conv["etape"]
     data = conv["data"] if isinstance(conv["data"], dict) else {}
 
-    # Etape 1: Type projet
+    # ANNULATION possible à tout moment
+    if msg_upper in ["ANNULER", "CANCEL", "RESET"]:
+        delete_conversation(expediteur)
+        envoyer_whatsapp(expediteur,
+            "❌ Signalement annulé.\n\nEnvoyez *#* pour recommencer.", message_id)
+        return True
+
+    # Etape 1 : NOM & PRENOM (NOUVEAU)
     if etape == 1:
+        nom = message.strip()
+        if len(nom) < 3:
+            envoyer_whatsapp(expediteur,
+                "⚠️ Veuillez indiquer votre NOM et PRENOM complets.\n\nExemple: KOUASSI Jean-Baptiste", message_id)
+            return True
+        data["nom_signalant"] = nom
+        set_conversation(expediteur, 2, data)
+        envoyer_formulaire_etape(expediteur, 2, message_id=message_id)
+        return True
+
+    # Etape 2 : Type projet
+    elif etape == 2:
         type_proj = None
         for i, tp in enumerate(TYPES_PROJET, 1):
             if str(i) == msg_upper or tp == msg_upper:
                 type_proj = tp
                 break
-
         if not type_proj:
             envoyer_whatsapp(expediteur,
-                "Non reconnu. Choisissez: RAN, RURAL, FIBRE, CORE, IPRAN, MWV, MMONEY, HOME, AUTRES", message_id)
+                "⚠️ TYPE NON RECONNU.\n\nChoisissez parmi:\nRAN, RURAL, FIBRE, CORE, IPRAN, MWV, MMONEY, HOME, AUTRES\n\nou repondez par le numero (1 a 9).", message_id)
             return True
-
         data["type_projet"] = type_proj
-        set_conversation(expediteur, 2, data)
-        envoyer_formulaire_etape(expediteur, 2, message_id=message_id)
-        return True
-
-    # Etape 2: Nom projet
-    elif etape == 2:
-        data["nom_projet"] = message.strip()
         set_conversation(expediteur, 3, data)
         envoyer_formulaire_etape(expediteur, 3, message_id=message_id)
         return True
 
-    # Etape 3: Site
+    # Etape 3 : Nom projet
     elif etape == 3:
-        data["site"] = message.strip()
+        data["nom_projet"] = message.strip()
         set_conversation(expediteur, 4, data)
         envoyer_formulaire_etape(expediteur, 4, message_id=message_id)
         return True
 
-    # Etape 4: Description
+    # Etape 4 : Site
     elif etape == 4:
-        data["description"] = message.strip()
+        data["site"] = message.strip()
         set_conversation(expediteur, 5, data)
-        envoyer_formulaire_etape(expediteur, 5, data, message_id=message_id)
+        envoyer_formulaire_etape(expediteur, 5, message_id=message_id)
         return True
 
-    # Etape 5: Confirmation
+    # Etape 5 : Description
     elif etape == 5:
+        if len(message.strip()) < 10:
+            envoyer_whatsapp(expediteur,
+                "⚠️ DESCRIPTION TROP COURTE.\n\nMerci de décrire le risque plus en détail.", message_id)
+            return True
+        data["description"] = message.strip()
+        set_conversation(expediteur, 6, data)
+        envoyer_formulaire_etape(expediteur, 6, data, message_id=message_id)
+        return True
+
+    # Etape 6 : Confirmation
+    elif etape == 6:
         if msg_upper in ["OK", "OUI", "VALIDER"]:
             return traiter_risque_confirme(expediteur, data, message_id)
         elif msg_upper in ["ANNULER", "NON", "RESET"]:
             delete_conversation(expediteur)
-            envoyer_whatsapp(expediteur, "Annule. Envoyez # pour recommencer.", message_id)
+            envoyer_whatsapp(expediteur, "❌ Annulé. Envoyez *#* pour recommencer.", message_id)
             return True
         else:
-            envoyer_whatsapp(expediteur, "Repondez OK ou ANNULER.", message_id)
+            envoyer_whatsapp(expediteur, "Repondez *OK* pour valider ou *ANNULER* pour recommencer.", message_id)
             return True
 
     return False
 
 def traiter_risque_confirme(expediteur, data, message_id):
-    envoyer_whatsapp(expediteur, "Analyse IA en cours... Patientez.", message_id)
+    envoyer_whatsapp(expediteur,
+        "⏳ ANALYSE IA EN COURS...\n\nVeuillez patienter quelques secondes.", message_id)
 
-    analyse = analyser_risque_ia(data["description"], data["site"], data["type_projet"])
+    nom_signalant = data.get("nom_signalant", "")
+    analyse = analyser_risque_ia(data["description"], data["site"], data["type_projet"], nom_signalant)
 
     risque_id = generer_risque_id(data["type_projet"])
 
     db_data = {
         "risque_id": risque_id,
         "source_stakeholder_contact": expediteur,
-        # CORRECTION 5 : on stocke le message_id du SIGNALANT pour notification de fermeture
+        "source_stakeholder_nom_prenom": nom_signalant,
         "message_id_signalant": message_id,
         "type_projet": data["type_projet"],
         "nom_projet": data["nom_projet"],
@@ -565,59 +585,78 @@ def traiter_risque_confirme(expediteur, data, message_id):
     success = sauvegarder_risque_complet(db_data, message_id)
 
     if not success:
-        envoyer_whatsapp(expediteur, "Erreur sauvegarde. Reessayez avec #.", message_id)
+        envoyer_whatsapp(expediteur,
+            "❌ ERREUR DE SAUVEGARDE.\n\nVeuillez reessayer avec *#*.", message_id)
         return True
 
     risque_complet = recuperer_risque_par_id(risque_id)
     score_global = risque_complet.get("score_global", 15) if risque_complet else 15
     priorite = risque_complet.get("priorite", "ELEVE") if risque_complet else "ELEVE"
 
+    # Emoji selon priorité
+    emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}.get(priorite, "⚪")
+
+    # AMELIORATION 1 : feedback enrichi avec champs en majuscules
     feedback = (
-        f"RISQUE ENREGISTRE - {risque_id}\n\n"
-        f"Projet: {data['type_projet']}\n"
-        f"Nom: {data['nom_projet']}\n"
-        f"Site: {data['site']}\n"
-        f"Type: {analyse['type_risque']}\n"
-        f"Priorite: {priorite}\n"
-        f"Score: {score_global}/25\n"
-        f"Probabilite: {analyse['score_probabilite_1_5']}/5\n"
-        f"Impact: {analyse['score_impact_1_5']}/5\n"
-        f"Strategie: {analyse['strategie_de_reponse']}\n"
-        f"Bloque: {'OUI' if analyse['bloquer_projet'] else 'NON'}\n\n"
-        f"Action: {analyse['action_immediate']}\n"
-        f"Confiance IA: {analyse.get('confiance', 0):.0%}\n"
-        f"Justification: {analyse.get('justification_scores', 'N/A')}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ RISQUE ENREGISTRE\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🆔 ID : *{risque_id}*\n"
+        f"👤 SIGNALE PAR : {nom_signalant.upper()}\n"
+        f"📁 PROJET : {data['type_projet']}\n"
+        f"🏗️ NOM PROJET : {data['nom_projet'].upper()}\n"
+        f"📍 SITE : {data['site'].upper()}\n"
+        f"🔖 TYPE : {analyse['type_risque']}\n"
+        f"{emoji_priorite} PRIORITE : {priorite}\n"
+        f"📊 SCORE : {score_global}/25 "
+        f"(P{analyse['score_probabilite_1_5']} × I{analyse['score_impact_1_5']})\n"
+        f"🚧 BLOQUE : {'OUI ⚠️' if analyse['bloquer_projet'] else 'NON'}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 ANALYSE IA\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📋 DESCRIPTION : {analyse['description_risque']}\n\n"
+        f"💥 IMPACT : {analyse['impact_risque']}\n\n"
+        f"⚡ ACTION IMMEDIATE : {analyse['action_immediate']}\n\n"
+        f"📅 COURT TERME : {analyse.get('action_court_terme', 'N/A')}\n\n"
+        f"🛡️ PREVENTION : {analyse.get('mesures_preventives', 'N/A')}\n\n"
+        f"🎯 STRATEGIE : {analyse['strategie_de_reponse']}\n"
+        f"🔍 CONFIANCE IA : {analyse.get('confiance', 0):.0%}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Votre responsable a ete alerte.\n"
-        f"Dashboard: {LIEN_DASHBOARD}\n\n"
-        f"Pour fermer ce risque, envoyez:\n"
-        f"CLOSE {risque_id}"
+        f"🌐 Dashboard: {LIEN_DASHBOARD}\n\n"
+        f"Pour fermer ce risque:\n"
+        f"*CLOSE {risque_id}*"
     )
     envoyer_whatsapp(expediteur, feedback, message_id)
-
-    # Suppression de la session persistante après confirmation
     delete_conversation(expediteur)
 
     destinataires = ESCALADE.get(priorite, [])
     if destinataires:
         alerte = (
-            f"ALERTE {priorite} - {data['type_projet']}\n"
-            f"ID: {risque_id}\n"
-            f"Nom projet: {data['nom_projet']}\n"
-            f"Site: {data['site']}\n"
-            f"Signale: {expediteur}\n"
-            f"Desc: {analyse['description_risque']}\n"
-            f"Impact: {analyse['impact_risque']}\n"
-            f"Score: {score_global}/25 (P{analyse['score_probabilite_1_5']}xI{analyse['score_impact_1_5']})\n"
-            f"Action: {analyse['action_immediate']}\n"
-            f"Bloque: {'OUI' if analyse['bloquer_projet'] else 'NON'}\n"
-            f"Confiance IA: {analyse.get('confiance', 0):.0%}\n\n"
-            f"Dashboard: {LIEN_DASHBOARD}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚨 ALERTE {priorite} {emoji_priorite}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🆔 ID : *{risque_id}*\n"
+            f"📁 PROJET : {data['type_projet']}\n"
+            f"🏗️ NOM PROJET : {data['nom_projet'].upper()}\n"
+            f"📍 SITE : {data['site'].upper()}\n"
+            f"👤 SIGNALE PAR : {nom_signalant.upper()}\n"
+            f"📞 CONTACT : {expediteur}\n\n"
+            f"📋 DESCRIPTION : {analyse['description_risque']}\n\n"
+            f"💥 IMPACT : {analyse['impact_risque']}\n\n"
+            f"📊 SCORE : {score_global}/25 "
+            f"(P{analyse['score_probabilite_1_5']} × I{analyse['score_impact_1_5']})\n"
+            f"🚧 BLOQUE : {'OUI ⚠️' if analyse['bloquer_projet'] else 'NON'}\n\n"
+            f"⚡ ACTION IMMEDIATE : {analyse['action_immediate']}\n\n"
+            f"👥 PARTIES PRENANTES : {analyse.get('parties_prenantes', 'N/A')}\n\n"
+            f"🔍 CONFIANCE IA : {analyse.get('confiance', 0):.0%}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 Dashboard: {LIEN_DASHBOARD}\n\n"
             f"Reagissez:\n"
             f"👍 = Pris en charge\n"
             f"⬆️ = Escalader\n\n"
-            f"Pour fermer: CLOSE {risque_id}"
+            f"Pour fermer: *CLOSE {risque_id}*"
         )
-
         for role in destinataires:
             astreinte = get_astreinte(role)
             if astreinte and astreinte.get("telephone"):
@@ -626,68 +665,285 @@ def traiter_risque_confirme(expediteur, data, message_id):
     return True
 
 # ============================================================
-# COMMANDES MANAGER
+# COMMANDES MANAGER (CLOSE, STATUS, UPDATE, ASSIGN, MES-RISQUES)
 # ============================================================
 
 def traiter_commande_manager(expediteur, message, message_id=None):
     msg_upper = message.strip().upper()
+    msg_original = message.strip()
 
-    # CORRECTION 6 : Regex élargie pour couvrir les préfixes de 2 à 5 lettres
-    # Couvre HOME (4 lettres), MWV (3 lettres), AUTRES → AUT (3 lettres), etc.
+    # --- CLOSE ---
     match_close = re.match(r'^(CLOSE|CLOSED)\s+([A-Z]{2,5}\d{8})$', msg_upper)
     if match_close:
         risque_id = match_close.group(2)
         risque = recuperer_risque_par_id(risque_id)
-
         if not risque:
-            envoyer_whatsapp(expediteur, f"Risque {risque_id} introuvable.", message_id)
+            envoyer_whatsapp(expediteur, f"❌ Risque *{risque_id}* introuvable.", message_id)
             return True
-
         if risque.get("statut") == "CLOSED":
-            envoyer_whatsapp(expediteur, f"{risque_id} deja ferme.", message_id)
+            envoyer_whatsapp(expediteur, f"ℹ️ *{risque_id}* est déjà fermé.", message_id)
             return True
-
-        fermer_risque(risque_id, "Fermeture via commande WhatsApp", expediteur)
-
+        # Demander la raison de fermeture
+        set_conversation(expediteur, "close_reason", {"risque_id": risque_id, "action": "CLOSE"})
         envoyer_whatsapp(expediteur,
-            f"Risque {risque_id} ferme.\n"
-            f"Nom: {risque.get('nom_projet')}\n"
-            f"Site: {risque.get('site')}\n"
-            f"Date: {datetime.now().strftime('%d/%m/%Y %H:%M')}", message_id)
-
-        # CORRECTION 5 (suite) : notification au signalant avec son propre message_id
-        signalant = risque.get("source_stakeholder_contact")
-        msg_id_signalant = risque.get("message_id_signalant")
-        if signalant:
-            envoyer_whatsapp(signalant,
-                f"Votre signalement {risque_id} a ete ferme.\n"
-                f"Merci pour votre vigilance.",
-                msg_id_signalant  # ← message_id du signalant, pas du manager
-            )
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔒 FERMETURE *{risque_id}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📍 SITE : {risque.get('site', '?').upper()}\n"
+            f"🏗️ PROJET : {risque.get('nom_projet', '?').upper()}\n\n"
+            f"Décrivez l'ACTION MENEE pour résoudre ce risque:", message_id)
         return True
 
-    # CORRECTION 6 (suite) : même correction regex pour STATUS
+    # --- UPDATE STATUT ---
+    # Format: UPDATE XXXAAMM0000 STATUT ACTION_MENEE
+    match_update = re.match(r'^UPDATE\s+([A-Z]{2,5}\d{8})\s+(OPENED|ASSIGNED|IN_PROGRESS|RESOLVED|CLOSED)\s+(.+)$', msg_upper)
+    if match_update:
+        risque_id = match_update.group(1)
+        nouveau_statut = match_update.group(2)
+        # Récupérer l'action depuis le message original (pour garder la casse)
+        parts = msg_original.split(None, 3)
+        action_menee = parts[3] if len(parts) >= 4 else "Mise à jour du statut"
+
+        risque = recuperer_risque_par_id(risque_id)
+        if not risque:
+            envoyer_whatsapp(expediteur, f"❌ Risque *{risque_id}* introuvable.", message_id)
+            return True
+
+        updates = {
+            "statut": nouveau_statut,
+            "reponse_apportee": action_menee,
+            "owner_contact": expediteur
+        }
+        if nouveau_statut in ["RESOLVED", "CLOSED"]:
+            updates["date_resolution"] = datetime.now().isoformat()
+
+        mettre_a_jour_risque(risque_id, updates)
+
+        emoji_statut = {
+            "OPENED": "🔴", "ASSIGNED": "🟠", "IN_PROGRESS": "🔵",
+            "RESOLVED": "🟢", "CLOSED": "⚫"
+        }.get(nouveau_statut, "⚪")
+
+        envoyer_whatsapp(expediteur,
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ STATUT MIS A JOUR\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🆔 ID : *{risque_id}*\n"
+            f"📍 SITE : {risque.get('site', '?').upper()}\n"
+            f"{emoji_statut} NOUVEAU STATUT : {nouveau_statut}\n"
+            f"📝 ACTION MENEE : {action_menee}\n"
+            f"🕐 DATE : {datetime.now().strftime('%d/%m/%Y à %H:%M')}", message_id)
+
+        # Notifier le signalant
+        signalant = risque.get("source_stakeholder_contact")
+        msg_id_signalant = risque.get("message_id_signalant")
+        if signalant and signalant != expediteur:
+            envoyer_whatsapp(signalant,
+                f"ℹ️ Mise à jour de votre signalement *{risque_id}*\n\n"
+                f"{emoji_statut} STATUT : {nouveau_statut}\n"
+                f"📝 ACTION : {action_menee}\n"
+                f"🕐 {datetime.now().strftime('%d/%m/%Y à %H:%M')}",
+                msg_id_signalant)
+        return True
+
+    # --- ASSIGN ---
+    # Format: ASSIGN XXXAAMM0000 +2250XXXXXXXX
+    match_assign = re.match(r'^ASSIGN\s+([A-Z]{2,5}\d{8})\s+(\+?\d{10,15})$', msg_upper)
+    if match_assign:
+        risque_id = match_assign.group(1)
+        numero_assignee = match_assign.group(2)
+        if not numero_assignee.startswith("+"):
+            numero_assignee = "+" + numero_assignee
+
+        risque = recuperer_risque_par_id(risque_id)
+        if not risque:
+            envoyer_whatsapp(expediteur, f"❌ Risque *{risque_id}* introuvable.", message_id)
+            return True
+
+        mettre_a_jour_risque(risque_id, {
+            "statut": "ASSIGNED",
+            "owner_contact": numero_assignee
+        })
+
+        envoyer_whatsapp(expediteur,
+            f"✅ *{risque_id}* assigné à *{numero_assignee}*\n"
+            f"📍 SITE : {risque.get('site', '?').upper()}", message_id)
+
+        # Notifier la personne assignée
+        envoyer_whatsapp(numero_assignee,
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 RISQUE ASSIGNE\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🆔 ID : *{risque_id}*\n"
+            f"📁 PROJET : {risque.get('type_projet', '?')}\n"
+            f"📍 SITE : {risque.get('site', '?').upper()}\n"
+            f"⚠️ PRIORITE : {risque.get('priorite', '?')}\n\n"
+            f"Vous etes responsable de ce risque.\n"
+            f"Pour mettre a jour: *UPDATE {risque_id} IN_PROGRESS votre action*\n"
+            f"Pour fermer: *CLOSE {risque_id}*")
+        return True
+
+    # --- STATUS ---
     match_status = re.match(r'^STATUS\s+([A-Z]{2,5}\d{8})$', msg_upper)
     if match_status:
         risque_id = match_status.group(1)
         risque = recuperer_risque_par_id(risque_id)
-
         if not risque:
-            envoyer_whatsapp(expediteur, f"{risque_id} introuvable.", message_id)
+            envoyer_whatsapp(expediteur, f"❌ *{risque_id}* introuvable.", message_id)
             return True
 
+        emoji_statut = {
+            "OPENED": "🔴", "ASSIGNED": "🟠", "IN_PROGRESS": "🔵",
+            "RESOLVED": "🟢", "CLOSED": "⚫"
+        }.get(risque.get("statut"), "⚪")
+        emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}.get(
+            risque.get("priorite"), "⚪")
+
         envoyer_whatsapp(expediteur,
-            f"STATUT {risque_id}\n"
-            f"Nom: {risque.get('nom_projet')}\n"
-            f"Site: {risque.get('site')}\n"
-            f"Priorite: {risque.get('priorite')}\n"
-            f"Score: {risque.get('score_global')}/25\n"
-            f"Statut: {risque.get('statut')}\n"
-            f"Owner: {risque.get('owner_nom') or risque.get('owner_contact')}\n"
-            f"Date: {str(risque.get('date_identification', ''))[:16]}", message_id)
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 STATUT *{risque_id}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📁 PROJET : {risque.get('type_projet', '?')}\n"
+            f"🏗️ NOM : {str(risque.get('nom_projet', '?')).upper()}\n"
+            f"📍 SITE : {str(risque.get('site', '?')).upper()}\n"
+            f"👤 SIGNALE PAR : {str(risque.get('source_stakeholder_nom_prenom', risque.get('source_stakeholder_contact', '?'))).upper()}\n"
+            f"{emoji_priorite} PRIORITE : {risque.get('priorite', '?')}\n"
+            f"📊 SCORE : {risque.get('score_global', '?')}/25\n"
+            f"{emoji_statut} STATUT : {risque.get('statut', '?')}\n"
+            f"👤 OWNER : {risque.get('owner_contact', '?')}\n"
+            f"📅 CREE : {str(risque.get('date_identification', '?'))[:16]}\n"
+            f"📝 ACTION : {risque.get('reponse_apportee', 'Aucune action renseignee')}", message_id)
         return True
 
+    # --- MES-RISQUES (liste par statut) ---
+    match_mes = re.match(r'^MES-RISQUES(?:\s+(OPENED|ASSIGNED|IN_PROGRESS|RESOLVED|CLOSED))?$', msg_upper)
+    if match_mes:
+        statut_filtre = match_mes.group(1)
+        return envoyer_liste_risques(expediteur, statut_filtre, message_id)
+
+    # --- RISQUES-SITE ---
+    match_site = re.match(r'^RISQUES-SITE\s+(.+)$', msg_upper)
+    if match_site:
+        site_recherche = match_site.group(1)
+        return envoyer_risques_par_site(expediteur, site_recherche, message_id)
+
     return False
+
+def envoyer_liste_risques(expediteur, statut_filtre=None, message_id=None):
+    supabase = get_supabase()
+    if not supabase:
+        envoyer_whatsapp(expediteur, "❌ Base non disponible.", message_id)
+        return True
+    try:
+        query = supabase.table("risques").select("*")
+        if statut_filtre:
+            query = query.eq("statut", statut_filtre)
+        else:
+            query = query.neq("statut", "CLOSED")
+        result = query.order("date_identification", desc=True).limit(10).execute()
+        risques = result.data if result.data else []
+
+        if not risques:
+            label = f"statut {statut_filtre}" if statut_filtre else "ouverts"
+            envoyer_whatsapp(expediteur, f"ℹ️ Aucun risque {label}.", message_id)
+            return True
+
+        label = statut_filtre or "OUVERTS"
+        msg = f"━━━━━━━━━━━━━━━━━━━━━━\n📋 RISQUES {label} ({len(risques)})\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}
+        for i, r in enumerate(risques, 1):
+            ep = emoji_priorite.get(r.get('priorite'), "⚪")
+            msg += (
+                f"{i}. *{r['risque_id']}*\n"
+                f"   📁 {r.get('type_projet','?')} — 📍 {str(r.get('site','?')).upper()}\n"
+                f"   {ep} {r.get('priorite','?')} | {r.get('score_global','?')}/25 | {r.get('statut','?')}\n\n"
+            )
+
+        msg += f"🌐 Dashboard: {LIEN_DASHBOARD}"
+        envoyer_whatsapp(expediteur, msg, message_id)
+        return True
+    except Exception as e:
+        print(f"==> Erreur liste risques: {e}")
+        envoyer_whatsapp(expediteur, "❌ Erreur récupération.", message_id)
+        return True
+
+def envoyer_risques_par_site(expediteur, site, message_id=None):
+    supabase = get_supabase()
+    if not supabase:
+        envoyer_whatsapp(expediteur, "❌ Base non disponible.", message_id)
+        return True
+    try:
+        result = supabase.table("risques").select("*").ilike("site", f"%{site}%").order(
+            "date_identification", desc=True).limit(10).execute()
+        risques = result.data if result.data else []
+
+        if not risques:
+            envoyer_whatsapp(expediteur, f"ℹ️ Aucun risque pour le site *{site.upper()}*.", message_id)
+            return True
+
+        msg = f"━━━━━━━━━━━━━━━━━━━━━━\n📋 RISQUES SITE {site.upper()} ({len(risques)})\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}
+        for i, r in enumerate(risques, 1):
+            ep = emoji_priorite.get(r.get('priorite'), "⚪")
+            msg += (
+                f"{i}. *{r['risque_id']}*\n"
+                f"   {ep} {r.get('priorite','?')} | {r.get('statut','?')}\n"
+                f"   📝 {str(r.get('description_risque','?'))[:60]}...\n\n"
+            )
+        msg += f"🌐 Dashboard: {LIEN_DASHBOARD}"
+        envoyer_whatsapp(expediteur, msg, message_id)
+        return True
+    except Exception as e:
+        print(f"==> Erreur risques site: {e}")
+        envoyer_whatsapp(expediteur, "❌ Erreur récupération.", message_id)
+        return True
+
+# Gestion de la session CLOSE avec raison
+def traiter_close_avec_raison(expediteur, message, message_id):
+    conv = get_conversation(expediteur)
+    if not conv or conv.get("etape") != "close_reason":
+        return False
+
+    data = conv.get("data", {})
+    risque_id = data.get("risque_id")
+    raison = message.strip()
+
+    if len(raison) < 5:
+        envoyer_whatsapp(expediteur,
+            "⚠️ Veuillez décrire l'ACTION MENEE plus en détail.", message_id)
+        return True
+
+    risque = recuperer_risque_par_id(risque_id)
+    mettre_a_jour_risque(risque_id, {
+        "statut": "CLOSED",
+        "reponse_apportee": raison,
+        "owner_contact": expediteur,
+        "date_resolution": datetime.now().isoformat()
+    })
+
+    delete_conversation(expediteur)
+
+    envoyer_whatsapp(expediteur,
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚫ RISQUE FERME\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🆔 ID : *{risque_id}*\n"
+        f"📍 SITE : {str(risque.get('site','?')).upper()}\n"
+        f"📝 ACTION MENEE : {raison}\n"
+        f"🕐 DATE : {datetime.now().strftime('%d/%m/%Y à %H:%M')}", message_id)
+
+    # Notifier le signalant
+    signalant = risque.get("source_stakeholder_contact") if risque else None
+    msg_id_signalant = risque.get("message_id_signalant") if risque else None
+    if signalant:
+        envoyer_whatsapp(signalant,
+            f"✅ Votre signalement *{risque_id}* a été fermé.\n\n"
+            f"📝 ACTION MENEE : {raison}\n"
+            f"🕐 {datetime.now().strftime('%d/%m/%Y à %H:%M')}\n\n"
+            f"Merci pour votre vigilance.",
+            msg_id_signalant)
+    return True
 
 # ============================================================
 # RECHERCHE PAR PERIODE
@@ -696,28 +952,25 @@ def traiter_commande_manager(expediteur, message, message_id=None):
 def traiter_recherche_periode(expediteur, message, message_id=None):
     msg_upper = message.strip().upper()
 
+    mois_map = {
+        'JANVIER': 1, 'JAN': 1, 'FEVRIER': 2, 'FEV': 2,
+        'MARS': 3, 'MAR': 3, 'AVRIL': 4, 'AVR': 4,
+        'MAI': 5, 'JUIN': 6, 'JUI': 6, 'JUILLET': 7,
+        'AOUT': 8, 'AOU': 8, 'SEPTEMBRE': 9, 'SEP': 9,
+        'OCTOBRE': 10, 'OCT': 10, 'NOVEMBRE': 11, 'NOV': 11,
+        'DECEMBRE': 12, 'DEC': 12
+    }
+
     match_liste = re.match(r'^LISTE\s+([A-ZÉÈÊ]+)(?:\s+(\d{4}))?$', msg_upper)
     if match_liste:
         mois_str = match_liste.group(1)
         annee_str = match_liste.group(2)
-
-        mois_map = {
-            'JANVIER': 1, 'JAN': 1, 'FEVRIER': 2, 'FEV': 2,
-            'MARS': 3, 'MAR': 3, 'AVRIL': 4, 'AVR': 4,
-            'MAI': 5, 'JUIN': 6, 'JUI': 6, 'JUILLET': 7,
-            'AOUT': 8, 'AOU': 8, 'SEPTEMBRE': 9, 'SEP': 9,
-            'OCTOBRE': 10, 'OCT': 10, 'NOVEMBRE': 11, 'NOV': 11,
-            'DECEMBRE': 12, 'DEC': 12
-        }
-
         if mois_str.isdigit():
             return envoyer_liste_annee(expediteur, int(mois_str), message_id)
-
         mois = mois_map.get(mois_str)
         if not mois:
-            envoyer_whatsapp(expediteur, "Mois non reconnu.", message_id)
+            envoyer_whatsapp(expediteur, "⚠️ Mois non reconnu.", message_id)
             return True
-
         annee = int(annee_str) if annee_str else datetime.now().year
         return envoyer_liste_mois(expediteur, annee, mois, message_id)
 
@@ -725,25 +978,13 @@ def traiter_recherche_periode(expediteur, message, message_id=None):
     if match_stats:
         mois_str = match_stats.group(1)
         annee_str = match_stats.group(2)
-
-        mois_map = {
-            'JANVIER': 1, 'JAN': 1, 'FEVRIER': 2, 'FEV': 2,
-            'MARS': 3, 'MAR': 3, 'AVRIL': 4, 'AVR': 4,
-            'MAI': 5, 'JUIN': 6, 'JUI': 6, 'JUILLET': 7,
-            'AOUT': 8, 'AOU': 8, 'SEPTEMBRE': 9, 'SEP': 9,
-            'OCTOBRE': 10, 'OCT': 10, 'NOVEMBRE': 11, 'NOV': 11,
-            'DECEMBRE': 12, 'DEC': 12
-        }
-
         if mois_str.isdigit():
             envoyer_whatsapp(expediteur, "Pour stats annuelles: STATS 2026", message_id)
             return True
-
         mois = mois_map.get(mois_str)
         if not mois:
-            envoyer_whatsapp(expediteur, "Mois non reconnu.", message_id)
+            envoyer_whatsapp(expediteur, "⚠️ Mois non reconnu.", message_id)
             return True
-
         annee = int(annee_str) if annee_str else datetime.now().year
         return envoyer_stats_mois(expediteur, annee, mois, message_id)
 
@@ -752,113 +993,95 @@ def traiter_recherche_periode(expediteur, message, message_id=None):
 def envoyer_liste_mois(expediteur, annee, mois, message_id=None):
     supabase = get_supabase()
     if not supabase:
-        envoyer_whatsapp(expediteur, "Base non disponible.", message_id)
+        envoyer_whatsapp(expediteur, "❌ Base non disponible.", message_id)
         return True
-
     aa = str(annee)[-2:]
     mm = f"{mois:02d}"
-    pattern = f"{aa}{mm}"
-
     try:
-        result = supabase.table("risques").select("*").like("risque_id", f"___{pattern}%").execute()
+        result = supabase.table("risques").select("*").like("risque_id", f"___{aa}{mm}%").execute()
         risques = result.data if result.data else []
-
         if not risques:
-            envoyer_whatsapp(expediteur, f"Aucun risque pour {mois:02d}/{annee}.", message_id)
+            envoyer_whatsapp(expediteur, f"ℹ️ Aucun risque pour {mois:02d}/{annee}.", message_id)
             return True
-
-        msg = f"RISQUES {mois:02d}/{annee} ({len(risques)}):\n\n"
+        msg = f"━━━━━━━━━━━━━━━━━━━━━━\n📋 RISQUES {mois:02d}/{annee} ({len(risques)})\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}
         for i, r in enumerate(risques[:10], 1):
+            ep = emoji_priorite.get(r.get('priorite'), "⚪")
             msg += (
-                f"{i}. {r['risque_id']}\n"
-                f"   {r['type_projet']} - {r['site']}\n"
-                f"   {r['priorite']} | {r['score_global']}/25\n\n"
+                f"{i}. *{r['risque_id']}*\n"
+                f"   📁 {r.get('type_projet','?')} — 📍 {str(r.get('site','?')).upper()}\n"
+                f"   {ep} {r.get('priorite','?')} | {r.get('score_global','?')}/25\n\n"
             )
-
         if len(risques) > 10:
-            msg += f"... et {len(risques) - 10} autres.\n"
-
-        msg += f"Dashboard: {LIEN_DASHBOARD}"
+            msg += f"... et {len(risques) - 10} autres.\n\n"
+        msg += f"🌐 Dashboard: {LIEN_DASHBOARD}"
         envoyer_whatsapp(expediteur, msg, message_id)
         return True
-
     except Exception as e:
         print(f"==> Erreur liste mois: {e}")
-        envoyer_whatsapp(expediteur, "Erreur recuperation.", message_id)
+        envoyer_whatsapp(expediteur, "❌ Erreur récupération.", message_id)
         return True
 
 def envoyer_liste_annee(expediteur, annee, message_id=None):
     supabase = get_supabase()
     if not supabase:
-        envoyer_whatsapp(expediteur, "Base non disponible.", message_id)
+        envoyer_whatsapp(expediteur, "❌ Base non disponible.", message_id)
         return True
-
     try:
         aa = str(annee)[-2:]
         result = supabase.table("risques").select("*").like("risque_id", f"___{aa}%").execute()
         risques = result.data if result.data else []
-
         if not risques:
-            envoyer_whatsapp(expediteur, f"Aucun risque pour {annee}.", message_id)
+            envoyer_whatsapp(expediteur, f"ℹ️ Aucun risque pour {annee}.", message_id)
             return True
-
         par_mois = {}
         for r in risques:
             mm = r['risque_id'][6:8]
-            if mm not in par_mois:
-                par_mois[mm] = []
-            par_mois[mm].append(r)
-
-        msg = f"RISQUES {annee} ({len(risques)}):\n\n"
+            par_mois.setdefault(mm, []).append(r)
+        msg = f"━━━━━━━━━━━━━━━━━━━━━━\n📋 RISQUES {annee} ({len(risques)})\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
         for mm in sorted(par_mois.keys()):
             mois_risques = par_mois[mm]
             critiques = sum(1 for r in mois_risques if r.get('priorite') == 'CRITIQUE')
-            msg += f"Mois {mm}: {len(mois_risques)} ({critiques} critiques)\n"
-
-        msg += f"\nDashboard: {LIEN_DASHBOARD}"
+            msg += f"📅 Mois {mm}: {len(mois_risques)} risque(s) ({critiques} 🔴 critiques)\n"
+        msg += f"\n🌐 Dashboard: {LIEN_DASHBOARD}"
         envoyer_whatsapp(expediteur, msg, message_id)
         return True
-
     except Exception as e:
         print(f"==> Erreur liste annee: {e}")
-        envoyer_whatsapp(expediteur, "Erreur recuperation.", message_id)
+        envoyer_whatsapp(expediteur, "❌ Erreur récupération.", message_id)
         return True
 
 def envoyer_stats_mois(expediteur, annee, mois, message_id=None):
     supabase = get_supabase()
     if not supabase:
-        envoyer_whatsapp(expediteur, "Base non disponible.", message_id)
+        envoyer_whatsapp(expediteur, "❌ Base non disponible.", message_id)
         return True
-
     try:
         result = supabase.rpc("stats_periode", {"annee": annee, "mois": mois}).execute()
         stats = result.data[0] if result.data else None
-
         if not stats:
-            envoyer_whatsapp(expediteur, f"Stats non dispos pour {mois:02d}/{annee}.", message_id)
+            envoyer_whatsapp(expediteur, f"ℹ️ Stats non disponibles pour {mois:02d}/{annee}.", message_id)
             return True
-
         msg = (
-            f"STATS {mois:02d}/{annee}\n\n"
-            f"Total: {stats.get('total', 0)}\n"
-            f"Bloquants: {stats.get('bloquants', 0)}\n"
-            f"Fermes: {stats.get('fermes', 0)}\n"
-            f"Score moyen: {stats.get('moyenne_score', 0):.2f}/25\n\n"
-            f"Par priorite:\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 STATS {mois:02d}/{annee}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📈 TOTAL : {stats.get('total', 0)}\n"
+            f"🚧 BLOQUANTS : {stats.get('bloquants', 0)}\n"
+            f"✅ FERMES : {stats.get('fermes', 0)}\n"
+            f"📊 SCORE MOYEN : {stats.get('moyenne_score', 0):.2f}/25\n\n"
+            f"PAR PRIORITE :\n"
         )
-
         par_prio = stats.get('par_priorite', {})
-        for prio in ['CRITIQUE', 'ELEVE', 'MOYEN', 'FAIBLE']:
+        for prio, emoji in [('CRITIQUE','🔴'), ('ELEVE','🟠'), ('MOYEN','🟡'), ('FAIBLE','🟢')]:
             if prio in par_prio:
-                msg += f"  {prio}: {par_prio[prio]}\n"
-
-        msg += f"\nDashboard: {LIEN_DASHBOARD}"
+                msg += f"  {emoji} {prio}: {par_prio[prio]}\n"
+        msg += f"\n🌐 Dashboard: {LIEN_DASHBOARD}"
         envoyer_whatsapp(expediteur, msg, message_id)
         return True
-
     except Exception as e:
         print(f"==> Erreur stats mois: {e}")
-        envoyer_whatsapp(expediteur, "Erreur stats.", message_id)
+        envoyer_whatsapp(expediteur, "❌ Erreur stats.", message_id)
         return True
 
 # ============================================================
@@ -868,57 +1091,51 @@ def envoyer_stats_mois(expediteur, annee, mois, message_id=None):
 def generer_rapport_hebdo():
     supabase = get_supabase()
     if not supabase:
-        print("==> Supabase non configure")
         return
-
     try:
         debut = (datetime.now() - timedelta(days=7)).isoformat()
         result = supabase.table("risques").select("*").gte("date_identification", debut).execute()
         risques = result.data
-
         total = len(risques)
         par_priorite = {}
         par_type_projet = {}
-        par_type_risque = {}
         moy_score = 0
         bloquants = 0
-
         for r in risques:
             p = r.get("priorite", "MOYEN")
             par_priorite[p] = par_priorite.get(p, 0) + 1
             tp = r.get("type_projet", "AUTRES")
             par_type_projet[tp] = par_type_projet.get(tp, 0) + 1
-            tr = r.get("type_risque", "AUTRES")
-            par_type_risque[tr] = par_type_risque.get(tr, 0) + 1
             moy_score += r.get("score_global", 0) or 0
             if r.get("bloque_projet"):
                 bloquants += 1
-
         moy_score = moy_score / total if total else 0
 
-        prompt = f"""Rapport semaine {datetime.now().isocalendar()[1]}
+        prompt = f"""Tu es un expert en gestion des risques télécoms en Côte d'Ivoire.
+Rédige un rapport hebdomadaire professionnel en FRANÇAIS PARFAIT pour WhatsApp.
 
-STATS:
-- Total: {total}
-- Par priorite: {json.dumps(par_priorite, ensure_ascii=False)}
+DONNÉES SEMAINE {datetime.now().isocalendar()[1]}:
+- Total risques: {total}
+- Par priorité: {json.dumps(par_priorite, ensure_ascii=False)}
 - Par projet: {json.dumps(par_type_projet, ensure_ascii=False)}
 - Score moyen: {moy_score:.1f}/25
-- Bloquants: {bloquants}
+- Risques bloquants: {bloquants}
 
-Genere rapport WhatsApp concis:
-1. Resume (2 lignes)
-2. Top 3 risques
-3. Tendances
-4. Score sante (0-100)
-5. Decisions urgentes"""
+Structure du rapport:
+1. RESUME EXECUTIF (2 phrases)
+2. CHIFFRES CLES
+3. TOP 3 POINTS D'ATTENTION
+4. TENDANCES OBSERVEES
+5. SCORE DE SANTE GLOBAL (0-100 avec explication)
+6. DECISIONS URGENTES REQUISES"""
 
         groq_client = get_groq_client()
         if groq_client:
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=800,
-                timeout=15
+                max_tokens=1000,
+                timeout=20
             )
             rapport = response.choices[0].message.content
         else:
@@ -942,51 +1159,49 @@ Genere rapport WhatsApp concis:
             astreinte = get_astreinte(role)
             if astreinte and astreinte.get("telephone"):
                 envoyer_whatsapp(astreinte["telephone"],
-                    f"RAPPORT HEBDO DigitalRisk\n\n{rapport}\n\nDashboard: {LIEN_DASHBOARD}")
-
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 RAPPORT HEBDO — S{datetime.now().isocalendar()[1]}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{rapport}\n\n"
+                    f"🌐 Dashboard: {LIEN_DASHBOARD}")
     except Exception as e:
         print(f"==> Erreur rapport: {e}")
 
 # ============================================================
-# CORRECTION 7 : ESCALADE TEMPORELLE — désormais appelée automatiquement
-# par le scheduler toutes les 5 minutes
+# ESCALADE TEMPORELLE
 # ============================================================
 
 def verifier_escalades_en_attente():
     supabase = get_supabase()
     if not supabase:
         return
-
     try:
         result = supabase.table("risques").select("*").eq("statut", "OPENED").lte(
             "date_identification",
             (datetime.now() - timedelta(minutes=15)).isoformat()
         ).execute()
-
         for alerte in result.data:
             priorite = alerte.get("priorite", "MOYEN")
             cree = datetime.fromisoformat(alerte["date_identification"].replace("Z", "+00:00"))
             minutes = (datetime.now() - cree.replace(tzinfo=None)).total_seconds() / 60
-
             regles = {
                 "CRITIQUE": (15, "CHEF_PROJET", "PMO"),
                 "ELEVE":    (30, "CHEF_PROJET", "DIRECTEUR"),
                 "MOYEN":    (60, "CHEF_PROJET", "DIRECTEUR")
             }
-
             if priorite in regles:
                 delai, _, niveau2 = regles[priorite]
                 if minutes > delai and alerte.get("niveau_escalade", 0) < 1:
                     astreinte = get_astreinte(niveau2)
                     if astreinte and astreinte.get("telephone"):
                         envoyer_whatsapp(astreinte["telephone"],
-                            f"ESCALADE [{priorite}] - {delai}min sans action\n"
-                            f"ID: {alerte['risque_id']}\n"
-                            f"Projet: {alerte['nom_projet']}\n"
-                            f"Site: {alerte['site']}\n"
-                            f"Desc: {alerte['description_risque']}\n"
-                            f"Signale: {alerte['source_stakeholder_contact']}\n\n"
-                            f"Dashboard: {LIEN_DASHBOARD}")
+                            f"⏰ ESCALADE [{priorite}] — {delai}min sans action\n\n"
+                            f"🆔 ID : *{alerte['risque_id']}*\n"
+                            f"🏗️ PROJET : {str(alerte.get('nom_projet','?')).upper()}\n"
+                            f"📍 SITE : {str(alerte.get('site','?')).upper()}\n"
+                            f"📋 DESC : {alerte.get('description_risque','?')}\n"
+                            f"👤 SIGNALE PAR : {str(alerte.get('source_stakeholder_nom_prenom', alerte.get('source_stakeholder_contact','?'))).upper()}\n\n"
+                            f"🌐 Dashboard: {LIEN_DASHBOARD}")
                         mettre_a_jour_risque(alerte["risque_id"], {"niveau_escalade": 1})
     except Exception as e:
         print(f"==> Erreur escalade: {e}")
@@ -997,7 +1212,7 @@ def verifier_escalades_en_attente():
 
 @app.route("/")
 def home():
-    return "DigitalRiskPlatform v4.1 - Sessions persistantes + Escalades automatiques", 200
+    return "DigitalRiskPlatform v5.0 — 5 etapes + UPDATE + ASSIGN + IA enrichie", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -1017,11 +1232,9 @@ def recevoir_message():
         entry = data.get("entry", [])
         if not entry:
             return jsonify({"status": "ok"})
-
         changes = entry[0].get("changes", [])
         if not changes:
             return jsonify({"status": "ok"})
-
         value = changes[0].get("value", {})
 
         # Reactions emoji
@@ -1031,36 +1244,28 @@ def recevoir_message():
                     emoji = msg["reaction"].get("emoji")
                     msg_id = msg["reaction"].get("message_id")
                     expediteur = msg["from"]
-
                     if emoji in ["👍", "✅", "🆗"]:
                         supabase = get_supabase()
                         if supabase:
                             result = supabase.table("risques").select("risque_id").eq("message_id_whatsapp", msg_id).execute()
                             if result.data:
                                 rid = result.data[0]["risque_id"]
-                                mettre_a_jour_risque(rid, {
-                                    "statut": "ASSIGNED",
-                                    "owner_contact": expediteur
-                                })
-                                envoyer_whatsapp(expediteur, f"Risque {rid} - Pris en charge.", msg_id)
+                                mettre_a_jour_risque(rid, {"statut": "ASSIGNED", "owner_contact": expediteur})
+                                envoyer_whatsapp(expediteur, f"✅ Risque *{rid}* — Pris en charge.", msg_id)
                         return jsonify({"status": "pris_en_charge"})
-
                     elif emoji in ["⬆️", "🔴", "⚠️"]:
-                        envoyer_whatsapp(expediteur, "Escalade notee.", msg_id)
+                        envoyer_whatsapp(expediteur, "⬆️ Escalade notée.", msg_id)
                         return jsonify({"status": "escalade"})
 
-        # Messages textes
         if "messages" not in value:
             return jsonify({"status": "ok"})
 
         msg_data = value["messages"][0]
         msg_id = msg_data["id"]
         msg_type = msg_data.get("type", "text")
-
         if msg_type != "text":
             return jsonify({"status": "ok"})
 
-        # CORRECTION 3 : déduplication — ignorer les messages déjà traités
         if message_deja_traite(msg_id):
             print(f"==> Message duplique ignore: {msg_id}")
             return jsonify({"status": "ok"})
@@ -1068,40 +1273,48 @@ def recevoir_message():
 
         message = msg_data["text"]["body"]
         expediteur = msg_data["from"]
+        print(f"==> Message: {message} | De: {expediteur}")
 
-        print(f"==> Message: {message}")
-        print(f"==> Expediteur: {expediteur}")
-        print(f"==> Message ID: {msg_id}")
+        # Session CLOSE en attente de raison
+        if traiter_close_avec_raison(expediteur, message, msg_id):
+            return jsonify({"status": "close_raison"})
 
-        # Commandes manager (CLOSE, STATUS)
+        # Commandes manager
         if traiter_commande_manager(expediteur, message, msg_id):
             return jsonify({"status": "commande_manager"})
 
-        # Recherche periode (LISTE, STATS)
+        # Recherche période
         if traiter_recherche_periode(expediteur, message, msg_id):
             return jsonify({"status": "recherche_periode"})
 
-        # Commandes generales
+        # Commandes générales
         cmd = message.strip().upper()
         if cmd in ["RAPPORT", "DASHBOARD"]:
-            envoyer_whatsapp(expediteur, f"Dashboard: {LIEN_DASHBOARD}", msg_id)
+            envoyer_whatsapp(expediteur, f"🌐 Dashboard: {LIEN_DASHBOARD}", msg_id)
             return jsonify({"status": "ok"})
 
         if cmd in ["AIDE", "HELP", "MENU"]:
             envoyer_whatsapp(expediteur,
-                "DigitalRiskPlatform\n\n"
-                "SIGNALER UN RISQUE:\n"
-                "Envoyez # pour commencer\n\n"
-                "RECHERCHE:\n"
-                "LISTE MAI [2026] - Risques du mois\n"
-                "LISTE 2026 - Risques de l'annee\n"
-                "STATS MAI [2026] - Statistiques\n\n"
-                "MANAGERS:\n"
-                "CLOSE XXXAAMM0000 - Fermer\n"
-                "STATUS XXXAAMM0000 - Voir statut\n\n"
-                "GENERAL:\n"
-                "RAPPORT - Dashboard\n"
-                "AIDE - Ce menu", msg_id)
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📱 DIGITALRISKPLATFORM\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📋 SIGNALER UN RISQUE:\n"
+                "Envoyez *#* pour commencer\n\n"
+                "📊 RECHERCHE:\n"
+                "LISTE MAI [2026] — Risques du mois\n"
+                "LISTE 2026 — Risques de l'année\n"
+                "STATS MAI [2026] — Statistiques\n\n"
+                "👤 MES RISQUES:\n"
+                "MES-RISQUES — Tous les risques ouverts\n"
+                "MES-RISQUES OPENED — Par statut\n"
+                "RISQUES-SITE COCODY — Par site\n\n"
+                "🔧 MANAGERS:\n"
+                "STATUS XXXAAMM0000 — Voir statut\n"
+                "CLOSE XXXAAMM0000 — Fermer\n"
+                "UPDATE XXXAAMM0000 IN_PROGRESS action — Mettre à jour\n"
+                "ASSIGN XXXAAMM0000 +225XXXXXXXXX — Assigner\n\n"
+                "📊 STATUTS: OPENED | ASSIGNED | IN_PROGRESS | RESOLVED | CLOSED\n\n"
+                "🌐 RAPPORT — Dashboard", msg_id)
             return jsonify({"status": "ok"})
 
         # Formulaire interactif
@@ -1118,7 +1331,7 @@ def recevoir_message():
     return jsonify({"status": "ok"})
 
 # ============================================================
-# ROUTES DE TEST (temporaires)
+# ROUTES DE TEST
 # ============================================================
 
 @app.route("/test-db")
@@ -1133,81 +1346,26 @@ def test_db():
     except Exception as e:
         return f"Erreur: {str(e)}", 500
 
-@app.route("/test-insert")
-def test_insert():
-    supabase = get_supabase()
-    if not supabase:
-        return "Supabase non configure", 500
-    try:
-        risque_id = generer_risque_id("RAN")
-        data = {
-            "risque_id": risque_id,
-            "source_stakeholder_contact": "+2250101089251",
-            "type_projet": "RAN",
-            "nom_projet": "Test Projet",
-            "site": "Cocody",
-            "message_original": "# Test manuel",
-            "type_risque": "TECHNIQUE",
-            "description_risque": "Test description",
-            "score_probabilite_1_5": 3,
-            "score_impact_1_5": 4,
-            "owner_contact": "+2250101089251"
-        }
-        result = supabase.table("risques").insert(data).execute()
-        return f"Risque cree: {risque_id}", 200
-    except Exception as e:
-        return f"Erreur: {str(e)}", 500
-
-@app.route("/test-whatsapp")
-def test_whatsapp():
-    result = envoyer_whatsapp("22558337112", "Test de connexion DigitalRiskPlatform")
-    if result:
-        return f"Message envoye avec ID: {result}", 200
-    return "Echec envoi - verifiez WA_TOKEN et WA_PHONE_ID, ou limite de messages atteinte", 500
-
 @app.route("/cron/escalades")
 def cron_escalades():
-    """
-    Endpoint de secours pour déclencher les escalades depuis un cron externe
-    (ex: cron-job.org, Railway cron, UptimeRobot) si APScheduler n'est pas disponible.
-    """
     verifier_escalades_en_attente()
     return "Escalades verifiees", 200
 
 @app.route("/cron/rapport-hebdo")
 def cron_rapport_hebdo():
-    """Endpoint de secours pour le rapport hebdomadaire."""
     generer_rapport_hebdo()
     return "Rapport genere", 200
 
 # ============================================================
-# CORRECTION 7 : DEMARRAGE avec scheduler pour escalades automatiques
+# DEMARRAGE
 # ============================================================
 
 def demarrer_scheduler():
-    """Lance APScheduler en arrière-plan pour les tâches périodiques."""
     scheduler = BackgroundScheduler(daemon=True)
-
-    # Vérification des escalades toutes les 5 minutes
-    scheduler.add_job(
-        verifier_escalades_en_attente,
-        'interval',
-        minutes=5,
-        id='escalades',
-        replace_existing=True
-    )
-
-    # Rapport hebdomadaire chaque lundi à 8h
-    scheduler.add_job(
-        generer_rapport_hebdo,
-        'cron',
-        day_of_week='mon',
-        hour=8,
-        minute=0,
-        id='rapport_hebdo',
-        replace_existing=True
-    )
-
+    scheduler.add_job(verifier_escalades_en_attente, 'interval', minutes=5,
+                      id='escalades', replace_existing=True)
+    scheduler.add_job(generer_rapport_hebdo, 'cron', day_of_week='mon',
+                      hour=8, minute=0, id='rapport_hebdo', replace_existing=True)
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
     print("==> Scheduler demarre : escalades (5min) + rapport hebdo (lundi 8h)")
