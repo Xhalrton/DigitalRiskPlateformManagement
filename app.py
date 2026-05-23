@@ -2145,17 +2145,8 @@ def recevoir_message():
                     valide=True
                 )
                 envoyer_whatsapp(expediteur,
-                    "━━━━━━━━━━━━━━━━━━━━━━
-"
-                    "👑 SUPERADMIN CONFIGURE
-"
-                    "━━━━━━━━━━━━━━━━━━━━━━
-
-"
-                    "Votre profil SuperAdmin a été créé automatiquement.
-
-"
-                    "Tapez *AIDE* pour voir toutes les commandes.", msg_id)
+                    "SuperAdmin configure. Tapez *AIDE* pour voir toutes les commandes.",
+                    msg_id)
                 return jsonify({"status": "superadmin_created"})
 
         # ---- COMMANDES ADMIN ----
