@@ -2133,6 +2133,30 @@ def recevoir_message():
             # SuperAdmin : vérifier si une session d'inscription est en cours (ne devrait pas, mais sécurité)
             if traiter_inscription(expediteur, message, msg_id):
                 return jsonify({"status": "inscription"})
+            # SuperAdmin pas encore en base → créer automatiquement
+            user_sa = get_utilisateur(expediteur)
+            if not user_sa:
+                creer_utilisateur(
+                    telephone=expediteur,
+                    nom_prenom="Super Admin",
+                    position="DIRECTEUR_PROJET",
+                    role="SUPERADMIN",
+                    actif=True,
+                    valide=True
+                )
+                envoyer_whatsapp(expediteur,
+                    "━━━━━━━━━━━━━━━━━━━━━━
+"
+                    "👑 SUPERADMIN CONFIGURE
+"
+                    "━━━━━━━━━━━━━━━━━━━━━━
+
+"
+                    "Votre profil SuperAdmin a été créé automatiquement.
+
+"
+                    "Tapez *AIDE* pour voir toutes les commandes.", msg_id)
+                return jsonify({"status": "superadmin_created"})
 
         # ---- COMMANDES ADMIN ----
         if traiter_commandes_admin(expediteur, message, msg_id):
