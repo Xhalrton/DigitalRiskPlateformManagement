@@ -806,6 +806,246 @@ def traiter_commandes_admin(expediteur, message, message_id=None):
 # ANALYSE IA
 # ============================================================
 
+
+# ============================================================
+# GESTION DES PROJETS
+# ============================================================
+
+def get_projets(type_projet=None, actif=True):
+    """Retourne la liste des projets, optionnellement filtrée par type."""
+    supabase = get_supabase()
+    if not supabase:
+        return []
+    try:
+        query = supabase.table("projets").select("*")
+        if actif:
+            query = query.eq("actif", True)
+        if type_projet:
+            query = query.eq("type_projet", type_projet)
+        result = query.order("type_projet").order("nom_projet").execute()
+        return result.data if result.data else []
+    except Exception as e:
+        print(f"==> Erreur get_projets: {e}")
+        return []
+
+def get_projet_par_id(projet_id):
+    supabase = get_supabase()
+    if not supabase:
+        return None
+    try:
+        result = supabase.table("projets").select("*").eq("id", projet_id).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        print(f"==> Erreur get_projet: {e}")
+        return None
+
+def creer_projet(type_projet, nom_projet, description, cree_par):
+    supabase = get_supabase()
+    if not supabase:
+        return False
+    try:
+        supabase.table("projets").insert({
+            "type_projet": type_projet,
+            "nom_projet": nom_projet,
+            "description": description,
+            "actif": True,
+            "cree_par": cree_par
+        }).execute()
+        return True
+    except Exception as e:
+        print(f"==> Erreur creer_projet: {e}")
+        return False
+
+def supprimer_projet(projet_id):
+    supabase = get_supabase()
+    if not supabase:
+        return False
+    try:
+        supabase.table("projets").update({"actif": False}).eq("id", projet_id).execute()
+        return True
+    except Exception as e:
+        print(f"==> Erreur supprimer_projet: {e}")
+        return False
+
+def formater_liste_projets(projets, titre="PROJETS DISPONIBLES"):
+    """Formate une liste numérotée de projets."""
+    msg = (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📁 {titre} ({len(projets)})\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    for i, p in enumerate(projets, 1):
+        msg += f"{i}. [{p['type_projet']}] {p['nom_projet']}\n"
+        if p.get("description"):
+            msg += f"   _{p['description'][:60]}_\n"
+        msg += "\n"
+    msg += "0. Saisir manuellement"
+    return msg
+
+def traiter_commandes_projets(expediteur, message, message_id=None):
+    """Gère les commandes PROJET AJOUTER, LISTE, SUPPRIMER."""
+    msg_upper = message.strip().upper()
+
+    # Réservé aux admins
+    if not est_admin(expediteur):
+        return False
+
+    # PROJET LISTE [type]
+    match_liste = re.match(r'^PROJET\s+LISTE(?:\s+([A-Z]+))?$', msg_upper)
+    if match_liste:
+        type_filtre = match_liste.group(1)
+        projets = get_projets(type_projet=type_filtre)
+        if not projets:
+            label = f"de type {type_filtre}" if type_filtre else ""
+            envoyer_whatsapp(expediteur,
+                f"ℹ️ Aucun projet {label} enregistré.\n\n"
+                f"Pour ajouter : *PROJET AJOUTER*", message_id)
+            return True
+        titre = f"PROJETS {type_filtre}" if type_filtre else "TOUS LES PROJETS"
+        msg = formater_liste_projets(projets, titre).replace("\n0. Saisir manuellement", "")
+        msg += f"\n\nPour ajouter : *PROJET AJOUTER*\n"
+        msg += f"Pour supprimer : *PROJET SUPPRIMER [numéro]*"
+        envoyer_whatsapp(expediteur, msg, message_id)
+        return True
+
+    # PROJET AJOUTER
+    if msg_upper == "PROJET AJOUTER":
+        set_conversation(expediteur, "PROJ_1", {})
+        envoyer_whatsapp(expediteur,
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📁 AJOUT PROJET — ETAPE 1/3\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Choisissez le TYPE de projet :\n\n"
+            "1. RAN\n2. RURAL\n3. FIBRE\n4. CORE\n5. IPRAN\n"
+            "6. MWV\n7. MMONEY\n8. HOME\n9. AUTRES\n10. TEST\n\n"
+            "Répondez par le NUMERO.", message_id)
+        return True
+
+    # PROJET SUPPRIMER [numéro ou nom]
+    match_suppr = re.match(r'^PROJET\s+SUPPRIMER\s+(.+)$', msg_upper)
+    if match_suppr:
+        valeur = match_suppr.group(1).strip()
+        projets = get_projets()
+        # Si numéro
+        if valeur.isdigit():
+            idx = int(valeur) - 1
+            if 0 <= idx < len(projets):
+                projet = projets[idx]
+                supprimer_projet(projet["id"])
+                envoyer_whatsapp(expediteur,
+                    f"✅ Projet supprimé :\n*{projet['nom_projet']}*", message_id)
+            else:
+                envoyer_whatsapp(expediteur, "❌ Numéro invalide.", message_id)
+        else:
+            # Chercher par nom
+            trouve = next((p for p in projets if valeur in p["nom_projet"].upper()), None)
+            if trouve:
+                supprimer_projet(trouve["id"])
+                envoyer_whatsapp(expediteur, f"✅ Projet *{trouve['nom_projet']}* supprimé.", message_id)
+            else:
+                envoyer_whatsapp(expediteur, f"❌ Projet *{valeur}* introuvable.", message_id)
+        return True
+
+    return False
+
+def traiter_flux_ajout_projet(expediteur, message, message_id):
+    """Gère le flux multi-étapes d'ajout de projet."""
+    conv = get_conversation(expediteur)
+    if not conv:
+        return False
+    etape = conv.get("etape", "")
+    if not str(etape).startswith("PROJ_"):
+        return False
+
+    data = conv.get("data", {})
+    msg_upper = message.strip().upper()
+
+    if msg_upper in ["ANNULER", "CANCEL"]:
+        delete_conversation(expediteur)
+        envoyer_whatsapp(expediteur, "❌ Ajout annulé.", message_id)
+        return True
+
+    if msg_upper == "!" and etape != "PROJ_1":
+        etapes_prev = {"PROJ_2": "PROJ_1", "PROJ_3": "PROJ_2"}
+        etape_prev = etapes_prev.get(etape)
+        if etape_prev:
+            set_conversation(expediteur, etape_prev, data)
+            traiter_flux_ajout_projet.__wrapped__(expediteur, "", message_id, etape_prev, data)
+        return True
+
+    if etape == "PROJ_1":
+        type_proj = None
+        for i, tp in enumerate(TYPES_PROJET, 1):
+            if str(i) == msg_upper or tp == msg_upper:
+                type_proj = tp
+                break
+        if not type_proj:
+            envoyer_whatsapp(expediteur, "⚠️ Type non reconnu. Répondez par 1 à 10.", message_id)
+            return True
+        data["type_projet"] = type_proj
+        set_conversation(expediteur, "PROJ_2", data)
+        envoyer_whatsapp(expediteur,
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📁 AJOUT PROJET — ETAPE 2/3\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Type : *{type_proj}*\n\n"
+            f"Indiquez le NOM EXACT du projet :\n\n"
+            f"Exemple: DEPLOIEMENT RAN ABIDJAN NORD\n\n"
+            f"_(Tapez *!* pour revenir)_", message_id)
+        return True
+
+    elif etape == "PROJ_2":
+        if len(message.strip()) < 3:
+            envoyer_whatsapp(expediteur, "⚠️ Nom trop court.", message_id)
+            return True
+        data["nom_projet"] = message.strip().upper()
+        set_conversation(expediteur, "PROJ_3", data)
+        envoyer_whatsapp(expediteur,
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📁 AJOUT PROJET — ETAPE 3/3\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Type : *{data['type_projet']}*\n"
+            f"Nom : *{data['nom_projet']}*\n\n"
+            f"Indiquez une DESCRIPTION courte du projet :\n"
+            f"(ou envoyez *SKIP* pour ignorer)\n\n"
+            f"_(Tapez *!* pour revenir)_", message_id)
+        return True
+
+    elif etape == "PROJ_3":
+        description = "" if msg_upper == "SKIP" else message.strip()
+        data["description"] = description
+
+        # Vérifier si le projet existe déjà
+        projets_existants = get_projets(type_projet=data["type_projet"], actif=True)
+        if any(p["nom_projet"].upper() == data["nom_projet"] for p in projets_existants):
+            envoyer_whatsapp(expediteur,
+                f"⚠️ Le projet *{data['nom_projet']}* existe déjà.\n"
+                f"Envoyez *PROJET LISTE {data['type_projet']}* pour voir.", message_id)
+            delete_conversation(expediteur)
+            return True
+
+        success = creer_projet(
+            type_projet=data["type_projet"],
+            nom_projet=data["nom_projet"],
+            description=description,
+            cree_par=expediteur
+        )
+        delete_conversation(expediteur)
+
+        if success:
+            envoyer_whatsapp(expediteur,
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ PROJET CREE\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📁 TYPE : {data['type_projet']}\n"
+                f"🏗️ NOM : {data['nom_projet']}\n"
+                f"📝 DESC : {description or 'Non renseignée'}", message_id)
+        else:
+            envoyer_whatsapp(expediteur, "❌ Erreur lors de la création.", message_id)
+        return True
+
+    return False
+
 def analyser_risque_ia(description, site, type_projet, nom_signalant=""):
     groq_client = get_groq_client()
     if not groq_client:
@@ -937,14 +1177,7 @@ def envoyer_formulaire_etape(numero, etape, data=None, message_id=None):
             "Répondez par le NUMERO ou le NOM.\n\n"
             "_(Tapez *!* pour revenir à l'étape précédente)_"
         ),
-        3: (
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📋 ETAPE 3/5 — NOM DU PROJET\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Indiquez le NOM PRECIS du projet.\n\n"
-            "Exemple: DEPLOIEMENT RAN ABIDJAN NORD\n\n"
-            "_(Tapez *!* pour revenir à l'étape précédente)_"
-        ),
+        3: "LISTE_PROJETS",
         4: (
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "📋 ETAPE 4/5 — SITE CONCERNE\n"
@@ -966,6 +1199,35 @@ def envoyer_formulaire_etape(numero, etape, data=None, message_id=None):
             "_(Tapez *!* pour revenir à l'étape précédente)_"
         ),
     }
+
+    if etape == 3:
+        # Etape 3 : afficher la liste des projets selon le type choisi
+        type_proj = (data or {}).get("type_projet", "")
+        projets_dispo = get_projets(type_projet=type_proj)
+        if projets_dispo:
+            msg_etape3 = (
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📋 ETAPE 3/5 — NOM DU PROJET\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Projets disponibles pour *{type_proj}* :\n\n"
+            )
+            for i, p in enumerate(projets_dispo, 1):
+                msg_etape3 += f"{i}. {p['nom_projet']}\n"
+                if p.get("description"):
+                    msg_etape3 += f"   _{p['description'][:50]}_\n"
+            msg_etape3 += "\n0. Saisir manuellement\n\n"
+            msg_etape3 += "_(Tapez *!* pour revenir au type de projet)_"
+        else:
+            msg_etape3 = (
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📋 ETAPE 3/5 — NOM DU PROJET\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Indiquez le NOM PRECIS du projet.\n\n"
+                "Exemple: DEPLOIEMENT RAN ABIDJAN NORD\n\n"
+                "_(Tapez *!* pour revenir à l'étape précédente)_"
+            )
+        envoyer_whatsapp(numero, msg_etape3, message_id)
+        return
 
     if etape == 6 and data:
         msg = (
@@ -1081,9 +1343,68 @@ def traiter_etape_conversation(expediteur, message, message_id):
         envoyer_formulaire_etape(expediteur, 3, message_id=message_id)
         return True
 
-    # ---- ETAPE 3 : NOM PROJET ----
+    # ---- ETAPE 3 : NOM PROJET (liste prédéfinie ou saisie libre) ----
     elif etape == 3:
-        data["nom_projet"] = message.strip()
+        # Si l'utilisateur choisit un numéro de la liste
+        type_proj = data.get("type_projet", "")
+        projets_dispo = get_projets(type_projet=type_proj)
+
+        if projets_dispo:
+            if msg_upper == "0":
+                # Saisie manuelle
+                set_conversation(expediteur, "3_LIBRE", data)
+                envoyer_whatsapp(expediteur,
+                    "📋 Indiquez le NOM PRECIS du projet :\n\n"
+                    "Exemple: DEPLOIEMENT RAN ABIDJAN NORD\n\n"
+                    "_(Tapez *!* pour revenir à la liste)_", message_id)
+                return True
+            elif message.strip().isdigit():
+                idx = int(message.strip()) - 1
+                if 0 <= idx < len(projets_dispo):
+                    data["nom_projet"] = projets_dispo[idx]["nom_projet"]
+                    set_conversation(expediteur, 4, data)
+                    envoyer_formulaire_etape(expediteur, 4, message_id=message_id)
+                    return True
+                else:
+                    envoyer_whatsapp(expediteur,
+                        f"⚠️ Numéro invalide. Choisissez entre 1 et {len(projets_dispo)}, ou *0* pour saisir manuellement.", message_id)
+                    return True
+            else:
+                # Texte libre — chercher dans la liste
+                trouve = next((p for p in projets_dispo if message.strip().upper() in p["nom_projet"].upper()), None)
+                if trouve:
+                    data["nom_projet"] = trouve["nom_projet"]
+                    set_conversation(expediteur, 4, data)
+                    envoyer_formulaire_etape(expediteur, 4, message_id=message_id)
+                    return True
+                else:
+                    # Afficher la liste
+                    msg = formater_liste_projets(projets_dispo, f"PROJETS {type_proj}")
+                    envoyer_whatsapp(expediteur,
+                        msg + "\n\n_(Tapez *!* pour revenir au type de projet)_", message_id)
+                    return True
+        else:
+            # Pas de projets prédéfinis — saisie libre directe
+            data["nom_projet"] = message.strip()
+            set_conversation(expediteur, 4, data)
+            envoyer_formulaire_etape(expediteur, 4, message_id=message_id)
+            return True
+
+    # ---- ETAPE 3_LIBRE : Saisie manuelle du nom projet ----
+    elif etape == "3_LIBRE":
+        if msg_upper == "!":
+            # Retour à la liste
+            type_proj = data.get("type_projet", "")
+            projets_dispo = get_projets(type_projet=type_proj)
+            set_conversation(expediteur, 3, data)
+            if projets_dispo:
+                msg = formater_liste_projets(projets_dispo, f"PROJETS {type_proj}")
+                envoyer_whatsapp(expediteur,
+                    msg + "\n\n_(Tapez *!* pour revenir au type de projet)_", message_id)
+            else:
+                envoyer_formulaire_etape(expediteur, 3, message_id=message_id)
+            return True
+        data["nom_projet"] = message.strip().upper()
         set_conversation(expediteur, 4, data)
         envoyer_formulaire_etape(expediteur, 4, message_id=message_id)
         return True
@@ -1268,11 +1589,241 @@ def traiter_risque_confirme(expediteur, data, message_id):
 # COMMANDES MANAGER (CLOSE, STATUS, UPDATE, ASSIGN, MES-RISQUES)
 # ============================================================
 
+
+# ============================================================
+# FONCTIONS INTERACTIVES — ASSIGN & CLOSE
+# ============================================================
+
+def get_risques_ouverts(expediteur=None):
+    """Retourne les risques non fermés, optionnellement filtrés par owner."""
+    supabase = get_supabase()
+    if not supabase:
+        return []
+    try:
+        query = supabase.table("risques").select("*").neq("statut", "CLOSED")
+        result = query.order("date_identification", desc=True).limit(20).execute()
+        return result.data if result.data else []
+    except Exception as e:
+        print(f"==> Erreur get_risques_ouverts: {e}")
+        return []
+
+def get_utilisateurs_actifs():
+    """Retourne tous les utilisateurs actifs."""
+    supabase = get_supabase()
+    if not supabase:
+        return []
+    try:
+        result = supabase.table("utilisateurs").select(
+            "telephone, nom_prenom, position"
+        ).eq("actif", True).order("nom_prenom").execute()
+        return result.data if result.data else []
+    except Exception as e:
+        print(f"==> Erreur get_utilisateurs_actifs: {e}")
+        return []
+
+def formater_liste_risques_num(risques, titre="RISQUES OUVERTS"):
+    """Formate une liste numérotée de risques."""
+    emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}
+    emoji_statut = {"OPENED": "🔴", "ASSIGNED": "🟠", "IN_PROGRESS": "🔵", "RESOLVED": "🟢"}
+    msg = (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 {titre} ({len(risques)})\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    for i, r in enumerate(risques, 1):
+        ep = emoji_priorite.get(r.get("priorite"), "⚪")
+        es = emoji_statut.get(r.get("statut"), "⚪")
+        msg += (
+            f"{i}. {ep}{es} *{r['risque_id']}*\n"
+            f"   📍 {str(r.get('site','?')).upper()} | {r.get('type_projet','?')}\n"
+            f"   📊 {r.get('score_global','?')}/25 | {r.get('statut','?')}\n\n"
+        )
+    return msg
+
+def formater_liste_utilisateurs_num(utilisateurs):
+    """Formate une liste numérotée d'utilisateurs."""
+    msg = (
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 CHOISISSEZ L'ASSIGNEE ({len(utilisateurs)})\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    for i, u in enumerate(utilisateurs, 1):
+        pos = u.get("position", "").replace("_", " ")
+        msg += f"{i}. 👤 *{u.get('nom_prenom','?').upper()}*\n"
+        msg += f"   💼 {pos}\n\n"
+    return msg
+
+def demarrer_assign(expediteur, message_id=None):
+    """Démarre le flux d'assignation interactif."""
+    risques = get_risques_ouverts()
+    if not risques:
+        envoyer_whatsapp(expediteur, "ℹ️ Aucun risque ouvert à assigner.", message_id)
+        return True
+    msg = formater_liste_risques_num(risques, "CHOISISSEZ LE RISQUE")
+    msg += "Répondez par le NUMERO du risque.\n"
+    msg += "_(Tapez *ANNULER* pour quitter)_"
+    set_conversation(expediteur, "assign_risque", {"risques": [r["risque_id"] for r in risques]})
+    envoyer_whatsapp(expediteur, msg, message_id)
+    return True
+
+def executer_assign(expediteur, risque_id, numero_assignee, message_id):
+    """Exécute l'assignation d'un risque."""
+    risque = recuperer_risque_par_id(risque_id)
+    if not risque:
+        envoyer_whatsapp(expediteur, f"❌ Risque *{risque_id}* introuvable.", message_id)
+        return True
+    mettre_a_jour_risque(risque_id, {"statut": "ASSIGNED", "owner_contact": numero_assignee})
+    envoyer_whatsapp(expediteur,
+        f"✅ *{risque_id}* assigné !\n\n"
+        f"📍 SITE : {risque.get('site','?').upper()}\n"
+        f"👤 ASSIGNEE : {numero_assignee}", message_id)
+    # Notifier l'assignée
+    user_info = get_utilisateur(numero_assignee)
+    nom_assignee = user_info.get("nom_prenom", numero_assignee).upper() if user_info else numero_assignee
+    envoyer_whatsapp(numero_assignee,
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 RISQUE ASSIGNE\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🆔 ID : *{risque_id}*\n"
+        f"📁 PROJET : {risque.get('type_projet','?')}\n"
+        f"🏗️ NOM : {str(risque.get('nom_projet','?')).upper()}\n"
+        f"📍 SITE : {str(risque.get('site','?')).upper()}\n"
+        f"⚠️ PRIORITE : {risque.get('priorite','?')}\n"
+        f"📊 SCORE : {risque.get('score_global','?')}/25\n\n"
+        f"📋 DESC : {risque.get('description_risque','?')[:100]}\n\n"
+        f"Vous êtes responsable de ce risque.\n"
+        f"Pour mettre à jour: *UPDATE {risque_id} IN_PROGRESS votre action*\n"
+        f"Pour fermer: *CLOSE {risque_id}*")
+    return True
+
+def demarrer_close(expediteur, message_id=None):
+    """Démarre le flux de fermeture interactif."""
+    risques = get_risques_ouverts()
+    if not risques:
+        envoyer_whatsapp(expediteur, "ℹ️ Aucun risque ouvert à fermer.", message_id)
+        return True
+    msg = formater_liste_risques_num(risques, "CHOISISSEZ LE RISQUE A FERMER")
+    msg += "Répondez par le NUMERO du risque.\n"
+    msg += "_(Tapez *ANNULER* pour quitter)_"
+    set_conversation(expediteur, "close_liste", {"risques": [r["risque_id"] for r in risques]})
+    envoyer_whatsapp(expediteur, msg, message_id)
+    return True
+
+def afficher_close_avec_resume(expediteur, risque_id, risque, message_id):
+    """Affiche le résumé du risque puis demande l'action menée."""
+    emoji_priorite = {"CRITIQUE": "🔴", "ELEVE": "🟠", "MOYEN": "🟡", "FAIBLE": "🟢"}
+    ep = emoji_priorite.get(risque.get("priorite"), "⚪")
+    set_conversation(expediteur, "close_reason", {"risque_id": risque_id})
+    envoyer_whatsapp(expediteur,
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔒 FERMETURE *{risque_id}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📁 PROJET : {risque.get('type_projet','?')}\n"
+        f"🏗️ NOM : {str(risque.get('nom_projet','?')).upper()}\n"
+        f"📍 SITE : {str(risque.get('site','?')).upper()}\n"
+        f"{ep} PRIORITE : {risque.get('priorite','?')} | {risque.get('score_global','?')}/25\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 RISQUE SIGNALE\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{risque.get('description_risque', risque.get('message_original','?'))[:200]}\n\n"
+        f"💥 IMPACT : {risque.get('impact_risque','Non renseigné')[:100]}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Décrivez l'ACTION MENEE pour résoudre ce risque :\n\n"
+        f"_(Tapez *!* pour annuler)_", message_id)
+    return True
+
+def traiter_sessions_interactives(expediteur, message, message_id):
+    """Gère les sessions interactives ASSIGN et CLOSE (choix par numéro)."""
+    conv = get_conversation(expediteur)
+    if not conv:
+        return False
+    etape = conv.get("etape", "")
+    data = conv.get("data", {})
+    msg_upper = message.strip().upper()
+
+    if msg_upper in ["ANNULER", "CANCEL"]:
+        delete_conversation(expediteur)
+        envoyer_whatsapp(expediteur, "❌ Opération annulée.", message_id)
+        return True
+
+    # ---- ASSIGN : choix du risque ----
+    if etape == "assign_risque":
+        if not message.strip().isdigit():
+            envoyer_whatsapp(expediteur, "⚠️ Répondez par un numéro.", message_id)
+            return True
+        idx = int(message.strip()) - 1
+        risques_ids = data.get("risques", [])
+        if not (0 <= idx < len(risques_ids)):
+            envoyer_whatsapp(expediteur, f"⚠️ Numéro invalide (1 à {len(risques_ids)}).", message_id)
+            return True
+        risque_id = risques_ids[idx]
+        risque = recuperer_risque_par_id(risque_id)
+
+        # Afficher la liste des utilisateurs
+        utilisateurs = get_utilisateurs_actifs()
+        if not utilisateurs:
+            envoyer_whatsapp(expediteur, "❌ Aucun utilisateur actif.", message_id)
+            delete_conversation(expediteur)
+            return True
+
+        msg = formater_liste_utilisateurs_num(utilisateurs)
+        msg += f"\nRisque sélectionné : *{risque_id}*\n"
+        msg += "Répondez par le NUMERO de l'assignée."
+        set_conversation(expediteur, "assign_user", {
+            "risque_id": risque_id,
+            "utilisateurs": [u["telephone"] for u in utilisateurs]
+        })
+        envoyer_whatsapp(expediteur, msg, message_id)
+        return True
+
+    # ---- ASSIGN : choix de l'utilisateur ----
+    elif etape == "assign_user":
+        if not message.strip().isdigit():
+            envoyer_whatsapp(expediteur, "⚠️ Répondez par un numéro.", message_id)
+            return True
+        idx = int(message.strip()) - 1
+        users_tels = data.get("utilisateurs", [])
+        if not (0 <= idx < len(users_tels)):
+            envoyer_whatsapp(expediteur, f"⚠️ Numéro invalide (1 à {len(users_tels)}).", message_id)
+            return True
+        risque_id = data.get("risque_id")
+        numero_assignee = users_tels[idx]
+        delete_conversation(expediteur)
+        return executer_assign(expediteur, risque_id, numero_assignee, message_id)
+
+    # ---- CLOSE : choix du risque ----
+    elif etape == "close_liste":
+        if not message.strip().isdigit():
+            envoyer_whatsapp(expediteur, "⚠️ Répondez par un numéro.", message_id)
+            return True
+        idx = int(message.strip()) - 1
+        risques_ids = data.get("risques", [])
+        if not (0 <= idx < len(risques_ids)):
+            envoyer_whatsapp(expediteur, f"⚠️ Numéro invalide (1 à {len(risques_ids)}).", message_id)
+            return True
+        risque_id = risques_ids[idx]
+        risque = recuperer_risque_par_id(risque_id)
+        if not risque:
+            envoyer_whatsapp(expediteur, f"❌ Risque introuvable.", message_id)
+            delete_conversation(expediteur)
+            return True
+        if risque.get("statut") == "CLOSED":
+            envoyer_whatsapp(expediteur, f"ℹ️ Ce risque est déjà fermé.", message_id)
+            delete_conversation(expediteur)
+            return True
+        return afficher_close_avec_resume(expediteur, risque_id, risque, message_id)
+
+    return False
+
 def traiter_commande_manager(expediteur, message, message_id=None):
     msg_upper = message.strip().upper()
     msg_original = message.strip()
 
-    # --- CLOSE ---
+    # --- CLOSE interactif ---
+    if msg_upper == "CLOSE":
+        return demarrer_close(expediteur, message_id)
+
+    # --- CLOSE direct avec ID ---
     match_close = re.match(r'^(CLOSE|CLOSED)\s+([A-Z]{2,5}\d{8})$', msg_upper)
     if match_close:
         risque_id = match_close.group(2)
@@ -1283,16 +1834,7 @@ def traiter_commande_manager(expediteur, message, message_id=None):
         if risque.get("statut") == "CLOSED":
             envoyer_whatsapp(expediteur, f"ℹ️ *{risque_id}* est déjà fermé.", message_id)
             return True
-        set_conversation(expediteur, "close_reason", {"risque_id": risque_id, "action": "CLOSE"})
-        envoyer_whatsapp(expediteur,
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔒 FERMETURE *{risque_id}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📍 SITE : {risque.get('site', '?').upper()}\n"
-            f"🏗️ PROJET : {risque.get('nom_projet', '?').upper()}\n\n"
-            f"Décrivez l'ACTION MENEE pour résoudre ce risque:\n\n"
-            "_(Tapez *!* pour annuler)_", message_id)
-        return True
+        return afficher_close_avec_resume(expediteur, risque_id, risque, message_id)
 
     # --- UPDATE STATUT ---
     match_update = re.match(r'^UPDATE\s+([A-Z]{2,5}\d{8})\s+(OPENED|ASSIGNED|IN_PROGRESS|RESOLVED|CLOSED)\s+(.+)$', msg_upper)
@@ -1343,40 +1885,16 @@ def traiter_commande_manager(expediteur, message, message_id=None):
                 msg_id_signalant)
         return True
 
-    # --- ASSIGN ---
+    # --- ASSIGN interactif ---
+    if msg_upper == "ASSIGN":
+        return demarrer_assign(expediteur, message_id)
+
+    # --- ASSIGN direct (rétrocompatibilité) ---
     match_assign = re.match(r'^ASSIGN\s+([A-Z]{2,5}\d{8})\s+(\+?\d{10,15})$', msg_upper)
     if match_assign:
         risque_id = match_assign.group(1)
-        numero_assignee = match_assign.group(2)
-        # Normaliser : supprimer le + si présent
-        numero_assignee = numero_assignee.lstrip("+")
-
-        risque = recuperer_risque_par_id(risque_id)
-        if not risque:
-            envoyer_whatsapp(expediteur, f"❌ Risque *{risque_id}* introuvable.", message_id)
-            return True
-
-        mettre_a_jour_risque(risque_id, {
-            "statut": "ASSIGNED",
-            "owner_contact": numero_assignee
-        })
-
-        envoyer_whatsapp(expediteur,
-            f"✅ *{risque_id}* assigné à *{numero_assignee}*\n"
-            f"📍 SITE : {risque.get('site', '?').upper()}", message_id)
-
-        envoyer_whatsapp(numero_assignee,
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 RISQUE ASSIGNE\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🆔 ID : *{risque_id}*\n"
-            f"📁 PROJET : {risque.get('type_projet', '?')}\n"
-            f"📍 SITE : {risque.get('site', '?').upper()}\n"
-            f"⚠️ PRIORITE : {risque.get('priorite', '?')}\n\n"
-            f"Vous êtes responsable de ce risque.\n"
-            f"Pour mettre à jour: *UPDATE {risque_id} IN_PROGRESS votre action*\n"
-            f"Pour fermer: *CLOSE {risque_id}*")
-        return True
+        numero_assignee = match_assign.group(2).lstrip("+")
+        return executer_assign(expediteur, risque_id, numero_assignee, message_id)
 
     # --- STATUS ---
     match_status = re.match(r'^STATUS\s+([A-Z]{2,5}\d{8})$', msg_upper)
@@ -2165,6 +2683,13 @@ def recevoir_message():
                     msg_id)
                 return jsonify({"status": "superadmin_created"})
 
+        # ---- SESSIONS INTERACTIVES (assign, close liste, ajout projet) ----
+        if traiter_sessions_interactives(expediteur, message, msg_id):
+            return jsonify({"status": "session_interactive"})
+
+        if traiter_flux_ajout_projet(expediteur, message, msg_id):
+            return jsonify({"status": "ajout_projet"})
+
         # ---- COMMANDES ADMIN ----
         if traiter_commandes_admin(expediteur, message, msg_id):
             return jsonify({"status": "commande_admin"})
@@ -2235,10 +2760,15 @@ def recevoir_message():
                 "MES-RISQUES — Tous les risques ouverts\n"
                 "RISQUES-SITE COCODY — Par site\n\n"
                 "🔧 GESTION:\n"
+                "CLOSE — Fermer un risque (interactif)\n"
+                "ASSIGN — Assigner un risque (interactif)\n"
                 "STATUS XXXAAMM0000 — Voir statut\n"
-                "CLOSE XXXAAMM0000 — Fermer\n"
-                "UPDATE XXXAAMM0000 IN_PROGRESS action\n"
-                "ASSIGN XXXAAMM0000 +225X\n"
+                "UPDATE XXXAAMM0000 IN_PROGRESS action\n\n"
+                "📁 PROJETS:\n"
+                "PROJET LISTE — Voir tous les projets\n"
+                "PROJET LISTE RAN — Filtrer par type\n"
+                "PROJET AJOUTER — Ajouter un projet\n"
+                "PROJET SUPPRIMER [num] — Supprimer\n"
                 f"{aide_admin}\n"
                 "🌐 RAPPORT — Dashboard", msg_id)
             return jsonify({"status": "ok"})
