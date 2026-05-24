@@ -565,8 +565,8 @@ def traiter_commandes_admin(expediteur, message, message_id=None):
     match_valider = re.match(r'^VALIDER\s+(\+?\d{10,15})(?:\s+([123]))?$', msg_upper)
     if match_valider:
         telephone_cible = match_valider.group(1)
-        if not telephone_cible.startswith("+"):
-            telephone_cible = "+" + telephone_cible
+        # Normaliser : supprimer le + si présent (stockage sans +)
+        telephone_cible = telephone_cible.lstrip("+")
         role_num = match_valider.group(2) or "3"
         role_attribue = ROLES.get(role_num, "UTILISATEUR")
 
@@ -627,8 +627,8 @@ def traiter_commandes_admin(expediteur, message, message_id=None):
     match_refuser = re.match(r'^REFUSER\s+(\+?\d{10,15})$', msg_upper)
     if match_refuser:
         telephone_cible = match_refuser.group(1)
-        if not telephone_cible.startswith("+"):
-            telephone_cible = "+" + telephone_cible
+        # Normaliser : supprimer le + si présent (stockage sans +)
+        telephone_cible = telephone_cible.lstrip("+")
 
         user = get_utilisateur(telephone_cible)
         if not user:
@@ -651,8 +651,8 @@ def traiter_commandes_admin(expediteur, message, message_id=None):
     match_role = re.match(r'^ROLE\s+(\+?\d{10,15})\s+([123])$', msg_upper)
     if match_role:
         telephone_cible = match_role.group(1)
-        if not telephone_cible.startswith("+"):
-            telephone_cible = "+" + telephone_cible
+        # Normaliser : supprimer le + si présent (stockage sans +)
+        telephone_cible = telephone_cible.lstrip("+")
         role_num = match_role.group(2)
         nouveau_role = ROLES.get(role_num, "UTILISATEUR")
 
@@ -713,8 +713,8 @@ def traiter_commandes_admin(expediteur, message, message_id=None):
     match_pos = re.match(r'^POSITION\s+(\+?\d{10,15})\s+([1-9])$', msg_upper)
     if match_pos:
         telephone_cible = match_pos.group(1)
-        if not telephone_cible.startswith("+"):
-            telephone_cible = "+" + telephone_cible
+        # Normaliser : supprimer le + si présent (stockage sans +)
+        telephone_cible = telephone_cible.lstrip("+")
         pos_num = match_pos.group(2)
         nouvelle_position = POSITIONS.get(pos_num)
         if not nouvelle_position:
@@ -768,8 +768,8 @@ def traiter_commandes_admin(expediteur, message, message_id=None):
     match_deact = re.match(r'^DESACTIVER\s+(\+?\d{10,15})$', msg_upper)
     if match_deact:
         telephone_cible = match_deact.group(1)
-        if not telephone_cible.startswith("+"):
-            telephone_cible = "+" + telephone_cible
+        # Normaliser : supprimer le + si présent (stockage sans +)
+        telephone_cible = telephone_cible.lstrip("+")
 
         if telephone_cible == SUPERADMIN_PHONE:
             envoyer_whatsapp(expediteur, "❌ Impossible de désactiver le SuperAdmin principal.", message_id)
@@ -1308,8 +1308,8 @@ def traiter_commande_manager(expediteur, message, message_id=None):
     if match_assign:
         risque_id = match_assign.group(1)
         numero_assignee = match_assign.group(2)
-        if not numero_assignee.startswith("+"):
-            numero_assignee = "+" + numero_assignee
+        # Normaliser : supprimer le + si présent
+        numero_assignee = numero_assignee.lstrip("+")
 
         risque = recuperer_risque_par_id(risque_id)
         if not risque:
