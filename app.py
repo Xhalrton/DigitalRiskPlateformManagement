@@ -2088,15 +2088,16 @@ def recevoir_message():
         # ---- VERIFICATION INSCRIPTION ----
         # Le SuperAdmin fixe est toujours autorisé
         if expediteur != SUPERADMIN_PHONE:
-            user = get_utilisateur(expediteur)
-            if not user:
-                # Nouvel utilisateur : démarrer l'inscription
-                demarrer_inscription(expediteur, msg_id)
-                return jsonify({"status": "inscription_demarree"})
-
-            # Utilisateur en cours d'inscription
+            # Vérifier D'ABORD si une session d'inscription est en cours
+            # (l'utilisateur n'est pas encore en base mais a déjà commencé l'inscription)
             if traiter_inscription(expediteur, message, msg_id):
                 return jsonify({"status": "inscription"})
+
+            user = get_utilisateur(expediteur)
+            if not user:
+                # Nouvel utilisateur sans session : démarrer l'inscription
+                demarrer_inscription(expediteur, msg_id)
+                return jsonify({"status": "inscription_demarree"})
 
             # Si compte inactif (désactivé par admin), bloquer
             if not user.get("actif", False):
