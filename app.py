@@ -179,29 +179,7 @@ def get_admins_actifs():
         print(f"==> Erreur get_admins_actifs: {e}")
     return admins
 
-def valider_inscription_expiree():
-    """Passe en rôle UTILISATEUR les inscriptions non validées après DELAI_VALIDATION_INSCRIPTION min."""
-    supabase = get_supabase()
-    if not supabase:
-        return
-    try:
-        limite = (datetime.now() - timedelta(minutes=DELAI_VALIDATION_INSCRIPTION)).isoformat()
-        result = supabase.table("utilisateurs").select("*").eq("valide", False).eq("actif", False).lte(
-            "date_inscription", limite
-        ).execute()
-        for u in result.data:
-            mettre_a_jour_utilisateur(u["telephone"], {
-                "actif": True,
-                "valide": False,
-                "role": "UTILISATEUR"
-            })
-            envoyer_whatsapp(u["telephone"],
-                "ℹ️ Votre compte a été activé avec le rôle *UTILISATEUR*.\n\n"
-                "Aucun admin n'a validé dans les 5 minutes.\n"
-                "Envoyez *#* pour signaler un risque.\n"
-                "Tapez *AIDE* pour voir toutes les commandes.")
-    except Exception as e:
-        print(f"==> Erreur validation expirée: {e}")
+# Fonction supprimée : validation automatique — les comptes sont activés immédiatement à l'inscription
 
 # ============================================================
 # SESSIONS PERSISTANTES
@@ -531,8 +509,8 @@ def traiter_inscription(expediteur, message, message_id):
                 nom_prenom=data["nom_prenom"],
                 position=data["position"],
                 role="UTILISATEUR",
-                actif=False,
-                valide=False
+                actif=True,
+                valide=True
             )
             delete_conversation(expediteur)
 
@@ -543,32 +521,25 @@ def traiter_inscription(expediteur, message, message_id):
 
             envoyer_whatsapp(expediteur,
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "⏳ INSCRIPTION EN ATTENTE\n"
+                "✅ INSCRIPTION REUSSIE\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"👤 {data['nom_prenom'].upper()}\n"
                 f"💼 {data['position'].replace('_', ' ')}\n\n"
-                "Un administrateur va valider votre compte.\n"
-                "⏰ Délai : 5 minutes\n\n"
-                "Sans validation, vous serez automatiquement\n"
-                "activé(e) avec le rôle UTILISATEUR.", message_id)
+                "Votre compte est activé !\n\n"
+                "Envoyez *#* pour signaler un risque.\n"
+                "Tapez *AIDE* pour voir toutes les commandes.", message_id)
 
-            # Notifier tous les admins actifs
+            # Notifier les admins (info seulement, pas de validation requise)
             admins = get_admins_actifs()
             for admin in admins:
-                envoyer_whatsapp(admin["telephone"],
-                    "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "🆕 NOUVELLE INSCRIPTION\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"👤 NOM : {data['nom_prenom'].upper()}\n"
-                    f"💼 POSITION : {data['position'].replace('_', ' ')}\n"
-                    f"📞 TELEPHONE : {expediteur}\n\n"
-                    "⏰ Validez dans les 5 minutes !\n\n"
-                    f"Pour valider et définir le rôle :\n"
-                    f"*VALIDER {expediteur} 3* (UTILISATEUR)\n"
-                    f"*VALIDER {expediteur} 2* (ADMIN)\n"
-                    f"*VALIDER {expediteur} 1* (SUPERADMIN)\n\n"
-                    f"Pour refuser :\n"
-                    f"*REFUSER {expediteur}*")
+                if admin["telephone"] != expediteur:
+                    envoyer_whatsapp(admin["telephone"],
+                        f"ℹ️ Nouvel utilisateur inscrit\n\n"
+                        f"👤 {data['nom_prenom'].upper()}\n"
+                        f"💼 {data['position'].replace('_', ' ')}\n"
+                        f"📞 {expediteur}\n\n"
+                        f"Rôle par défaut : UTILISATEUR\n"
+                        f"Pour modifier : *ROLE {expediteur} 2*")
             return True
         else:
             envoyer_whatsapp(expediteur,
@@ -2127,14 +2098,12 @@ def recevoir_message():
             if traiter_inscription(expediteur, message, msg_id):
                 return jsonify({"status": "inscription"})
 
-            # Utilisateur en attente de validation (pas encore actif)
+            # Si compte inactif (désactivé par admin), bloquer
             if not user.get("actif", False):
                 envoyer_whatsapp(expediteur,
-                    "⏳ Votre compte est en attente de validation.\n\n"
-                    "Un administrateur vous activera sous peu.\n"
-                    "Sans validation, votre accès sera automatiquement\n"
-                    f"activé après {DELAI_VALIDATION_INSCRIPTION} minutes.", msg_id)
-                return jsonify({"status": "en_attente_validation"})
+                    "⚠️ Votre compte est désactivé.\n"
+                    "Contactez votre administrateur.", msg_id)
+                return jsonify({"status": "compte_desactive"})
         else:
             # SuperAdmin : vérifier si une session d'inscription est en cours (ne devrait pas, mais sécurité)
             if traiter_inscription(expediteur, message, msg_id):
@@ -2272,10 +2241,7 @@ def cron_rapport_hebdo():
     generer_rapport_hebdo()
     return "Rapport généré", 200
 
-@app.route("/cron/valider-inscriptions")
-def cron_valider_inscriptions():
-    valider_inscription_expiree()
-    return "Inscriptions expirées traitées", 200
+
 
 # ============================================================
 # DEMARRAGE
@@ -2287,9 +2253,7 @@ def demarrer_scheduler():
                       id='escalades', replace_existing=True)
     scheduler.add_job(generer_rapport_hebdo, 'cron', day_of_week='mon',
                       hour=8, minute=0, id='rapport_hebdo', replace_existing=True)
-    # Validation des inscriptions expirées toutes les 2 minutes
-    scheduler.add_job(valider_inscription_expiree, 'interval', minutes=2,
-                      id='validations', replace_existing=True)
+
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
     print("==> Scheduler démarré : escalades (5min) + rapport (lundi 8h) + validations (2min)")
