@@ -32,7 +32,7 @@ LIEN_DASHBOARD = os.environ.get("DASHBOARD_URL", "https://google.com")
 # Délai de validation inscription (en minutes)
 DELAI_VALIDATION_INSCRIPTION = 5
 
-TYPES_PROJET = ["RAN", "RURAL", "FIBRE", "CORE", "IPRAN", "MWV", "MMONEY", "HOME", "AUTRES"]
+TYPES_PROJET = ["RAN", "RURAL", "FIBRE", "CORE", "IPRAN", "MWV", "MMONEY", "HOME", "AUTRES", "TEST"]
 TYPES_RISQUE = ["ACCES", "SECURITE", "TECHNIQUE", "ADMINISTRATIF", "METEO", "LOGISTIQUE", "SANITAIRE", "SOCIAL", "AUTRES"]
 STATUTS_VALIDES = ["OPENED", "ASSIGNED", "IN_PROGRESS", "RESOLVED", "CLOSED"]
 
@@ -281,18 +281,22 @@ def generer_risque_id(type_projet):
     now = datetime.now()
     aa = str(now.year)[-2:]
     mm = f"{now.month:02d}"
-    base_prefix = f"{prefix}{aa}{mm}"
+    # Compter TOUS les risques du mois (indépendamment du type)
+    # pour avoir un compteur global incrémental
     supabase = get_supabase()
     if supabase:
         try:
-            result = supabase.table("risques").select("risque_id").like("risque_id", f"{base_prefix}%").execute()
+            # Chercher tous les risques dont l'ID contient AAMMM (positions 3-6)
+            result = supabase.table("risques").select("risque_id").like(
+                "risque_id", f"____{aa}{mm}%"
+            ).execute()
             count = len(result.data) if result.data else 0
         except Exception as e:
             print(f"==> Erreur comptage: {e}")
             count = 0
     else:
         count = 0
-    return f"{base_prefix}{count + 1:04d}"
+    return f"{prefix}{aa}{mm}{count + 1:04d}"
 
 # ============================================================
 # SUPABASE — RISQUES
@@ -925,7 +929,7 @@ def envoyer_formulaire_etape(numero, etape, data=None, message_id=None):
             "📋 ETAPE 2/5 — TYPE DE PROJET\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "1. RAN\n2. RURAL\n3. FIBRE\n4. CORE\n5. IPRAN\n"
-            "6. MWV\n7. MMONEY\n8. HOME\n9. AUTRES\n\n"
+            "6. MWV\n7. MMONEY\n8. HOME\n9. AUTRES\n10. TEST\n\n"
             "Répondez par le NUMERO ou le NOM.\n\n"
             "_(Tapez *!* pour revenir à l'étape précédente)_"
         ),
@@ -1066,7 +1070,7 @@ def traiter_etape_conversation(expediteur, message, message_id):
                 break
         if not type_proj:
             envoyer_whatsapp(expediteur,
-                "⚠️ TYPE NON RECONNU.\n\nChoisissez parmi:\nRAN, RURAL, FIBRE, CORE, IPRAN, MWV, MMONEY, HOME, AUTRES\n\nou répondez par le numéro (1 à 9).", message_id)
+                "⚠️ TYPE NON RECONNU.\n\nChoisissez parmi:\nRAN, RURAL, FIBRE, CORE, IPRAN, MWV, MMONEY, HOME, AUTRES, TEST\n\nou répondez par le numéro (1 à 10).", message_id)
             return True
         data["type_projet"] = type_proj
         set_conversation(expediteur, 3, data)
