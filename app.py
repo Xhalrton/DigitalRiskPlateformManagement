@@ -1215,12 +1215,44 @@ def traiter_risque_confirme(expediteur, data, message_id):
         f"Pour fermer: *CLOSE {risque_id}*"
     )
 
+
+    # Notifier : SuperAdmin + Admins + positions responsables
     deja_notifies = set()
-    for position in destinataires_positions:
-        contact = get_astreinte(position)
-        if contact and contact.get("telephone") and contact["telephone"] not in deja_notifies:
-            envoyer_whatsapp(contact["telephone"], alerte, message_id)
-            deja_notifies.add(contact["telephone"])
+    # Ne pas notifier le signalant lui-même
+    if expediteur:
+        deja_notifies.add(expediteur)
+
+    # 1. SuperAdmin toujours notifié
+    if SUPERADMIN_PHONE and SUPERADMIN_PHONE not in deja_notifies:
+        envoyer_whatsapp(SUPERADMIN_PHONE, alerte, message_id)
+        deja_notifies.add(SUPERADMIN_PHONE)
+
+    # 2. Tous les Admins actifs
+    admins = get_admins_actifs()
+    for admin in admins:
+        tel = admin.get("telephone")
+        if tel and tel not in deja_notifies:
+            envoyer_whatsapp(tel, alerte, message_id)
+            deja_notifies.add(tel)
+
+    # 3. Positions responsables à notifier pour tout risque
+    POSITIONS_A_NOTIFIER = [
+        "DIRECTEUR_PROJET", "PMO", "CHEF_DE_PROJET",
+        "CONSULTANT_EXTERNE", "COORDINATEUR_PROJET", "SUPERVISEUR"
+    ]
+    supabase = get_supabase()
+    if supabase:
+        try:
+            result = supabase.table("utilisateurs").select(
+                "telephone, nom_prenom"
+            ).in_("position", POSITIONS_A_NOTIFIER).eq("actif", True).execute()
+            for u in result.data:
+                tel = u.get("telephone")
+                if tel and tel not in deja_notifies:
+                    envoyer_whatsapp(tel, alerte, message_id)
+                    deja_notifies.add(tel)
+        except Exception as e:
+            print(f"==> Erreur notification positions: {e}")
 
     return True
 
