@@ -29,8 +29,6 @@ SUPERADMIN_PHONE = os.environ.get("SUPERADMIN_PHONE", "+2250500000000")
 
 LIEN_DASHBOARD = os.environ.get("DASHBOARD_URL", "https://google.com")
 
-# Délai de validation inscription (en minutes)
-DELAI_VALIDATION_INSCRIPTION = 5
 
 TYPES_PROJET = ["RAN", "RURAL", "FIBRE", "CORE", "IPRAN", "MWV", "MMONEY", "HOME", "AUTRES", "TEST"]
 TYPES_RISQUE = ["ACCES", "SECURITE", "TECHNIQUE", "ADMINISTRATIF", "METEO", "LOGISTIQUE", "SANITAIRE", "SOCIAL", "AUTRES"]
@@ -95,7 +93,7 @@ def get_utilisateur(telephone):
         print(f"==> Erreur get_utilisateur: {e}")
         return None
 
-def creer_utilisateur(telephone, nom_prenom, position, role="UTILISATEUR", actif=False, valide=False):
+def creer_utilisateur(telephone, nom_prenom, position, role="UTILISATEUR", actif=True, valide=True):
     """Crée un utilisateur en base."""
     supabase = get_supabase()
     if not supabase:
@@ -511,7 +509,7 @@ def traiter_inscription(expediteur, message, message_id):
             return True
 
         if msg_upper in ["OK", "OUI", "VALIDER"]:
-            # Enregistrer avec actif=False en attente de validation
+            # Enregistrer directement comme actif (pas de validation requise)
             success = creer_utilisateur(
                 telephone=expediteur,
                 nom_prenom=data["nom_prenom"],
