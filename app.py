@@ -1037,6 +1037,11 @@ def traiter_etape_conversation(expediteur, message, message_id):
         return True
 
     etape = conv["etape"]
+    # Convertir en int si stocké comme texte numérique par Supabase
+    try:
+        etape = int(etape)
+    except (ValueError, TypeError):
+        pass
     # Ignorer si la session est une session non-formulaire (STAT, close_reason, etc.)
     if not isinstance(etape, int):
         return False
