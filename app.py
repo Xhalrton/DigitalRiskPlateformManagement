@@ -1020,6 +1020,7 @@ def traiter_etape_conversation(expediteur, message, message_id):
 
         # Pré-remplir le nom si l'utilisateur est connu
         user_info = get_role_utilisateur_info(expediteur)
+        print(f"==> DEBUG # recu - user_info: {user_info}")
         initial_data = {}
         if user_info and user_info.get("nom_prenom"):
             initial_data["nom_signalant"] = user_info["nom_prenom"]
