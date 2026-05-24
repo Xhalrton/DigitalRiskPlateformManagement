@@ -281,15 +281,19 @@ def generer_risque_id(type_projet):
     now = datetime.now()
     aa = str(now.year)[-2:]
     mm = f"{now.month:02d}"
-    # Compter TOUS les risques du mois (indépendamment du type)
-    # pour avoir un compteur global incrémental
+    # Compter TOUS les risques du mois via date_identification
+    # pour avoir un compteur global incrémental indépendant du type
     supabase = get_supabase()
     if supabase:
         try:
-            # Chercher tous les risques dont l'ID contient AAMMM (positions 3-6)
-            result = supabase.table("risques").select("risque_id").like(
-                "risque_id", f"____{aa}{mm}%"
-            ).execute()
+            debut_mois = f"{now.year}-{now.month:02d}-01"
+            if now.month == 12:
+                fin_mois = f"{now.year + 1}-01-01"
+            else:
+                fin_mois = f"{now.year}-{now.month + 1:02d}-01"
+            result = supabase.table("risques").select("risque_id").gte(
+                "date_identification", debut_mois
+            ).lt("date_identification", fin_mois).execute()
             count = len(result.data) if result.data else 0
         except Exception as e:
             print(f"==> Erreur comptage: {e}")
