@@ -183,13 +183,37 @@ def get_admins_actifs():
 # SESSIONS PERSISTANTES
 # ============================================================
 
+SESSION_EXPIRATION_MINUTES = 10
+
 def get_conversation(numero):
     supabase = get_supabase()
     if not supabase:
         return None
     try:
         result = supabase.table("sessions_wa").select("*").eq("numero", numero).execute()
-        return result.data[0] if result.data else None
+        if not result.data:
+            return None
+        conv = result.data[0]
+        # Vérifier expiration (10 minutes d'inactivité)
+        updated_at = conv.get("updated_at")
+        if updated_at:
+            try:
+                updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                # Rendre timezone-aware si nécessaire
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=None)
+                    now = datetime.now()
+                else:
+                    now = datetime.now().astimezone(updated.tzinfo)
+                age_minutes = (now - updated).total_seconds() / 60
+                if age_minutes > SESSION_EXPIRATION_MINUTES:
+                    # Session expirée — supprimer silencieusement
+                    print(f"==> Session expirée ({age_minutes:.1f}min) pour {numero}")
+                    supabase.table("sessions_wa").delete().eq("numero", numero).execute()
+                    return None
+            except Exception as e:
+                print(f"==> Erreur vérification expiration: {e}")
+        return conv
     except Exception as e:
         print(f"==> Erreur get_conversation: {e}")
         return None
@@ -207,6 +231,36 @@ def set_conversation(numero, etape, data):
         }).execute()
     except Exception as e:
         print(f"==> Erreur set_conversation: {e}")
+
+def nettoyer_sessions_expirees():
+    """Supprime toutes les sessions inactives depuis plus de SESSION_EXPIRATION_MINUTES minutes."""
+    supabase = get_supabase()
+    if not supabase:
+        return
+    try:
+        limite = (datetime.now() - timedelta(minutes=SESSION_EXPIRATION_MINUTES)).isoformat()
+        result = supabase.table("sessions_wa").select("numero, etape, updated_at").lte(
+            "updated_at", limite
+        ).execute()
+        if result.data:
+            for session in result.data:
+                numero = session["numero"]
+                etape = session.get("etape", "?")
+                # Ne pas supprimer les sessions de signalement en cours sans prévenir
+                try:
+                    etape_int = int(etape)
+                    if etape_int >= 2:
+                        # Prévenir l'utilisateur que sa session a expiré
+                        envoyer_whatsapp(numero,
+                            "⏰ *Session expirée*\n\n"
+                            "Votre formulaire en cours a expiré après 10 minutes d'inactivité.\n\n"
+                            "Envoyez *#* pour recommencer.")
+                except (ValueError, TypeError):
+                    pass
+                supabase.table("sessions_wa").delete().eq("numero", numero).execute()
+            print(f"==> {len(result.data)} session(s) expirée(s) nettoyée(s)")
+    except Exception as e:
+        print(f"==> Erreur nettoyage sessions: {e}")
 
 def delete_conversation(numero):
     supabase = get_supabase()
@@ -1254,7 +1308,8 @@ def traiter_etape_conversation(expediteur, message, message_id):
     if not conv:
         if not msg_upper.startswith("#"):
             envoyer_whatsapp(expediteur,
-                "Pour signaler un risque, envoyez *#* pour commencer.", message_id)
+                "Pour signaler un risque, envoyez *#* pour commencer.\n"
+                "_(Les sessions expirent après 10 minutes d'inactivité)_", message_id)
             return True
 
         # Pré-remplir le nom si l'utilisateur est connu
@@ -2823,12 +2878,14 @@ def demarrer_scheduler():
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(verifier_escalades_en_attente, 'interval', minutes=5,
                       id='escalades', replace_existing=True)
+    scheduler.add_job(nettoyer_sessions_expirees, 'interval', minutes=5,
+                      id='sessions_expiration', replace_existing=True)
     scheduler.add_job(generer_rapport_hebdo, 'cron', day_of_week='mon',
                       hour=8, minute=0, id='rapport_hebdo', replace_existing=True)
 
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
-    print("==> Scheduler démarré : escalades (5min) + rapport (lundi 8h) + validations (2min)")
+    print("==> Scheduler démarré : escalades (5min) + sessions expiration (5min) + rapport (lundi 8h)")
     return scheduler
 
 if __name__ == "__main__":
