@@ -824,6 +824,36 @@ def traiter_commandes_admin(expediteur, message, message_id=None):
             envoyer_whatsapp(expediteur, f"❌ Erreur: {e}", message_id)
         return True
 
+    # --- AJOUTER un utilisateur manuellement ---
+    if msg_upper.startswith("AJOUTER "):
+        telephone_cible = msg_upper.replace("AJOUTER ", "").strip().lstrip("+")
+        if not telephone_cible.isdigit() or len(telephone_cible) < 8:
+            envoyer_whatsapp(expediteur,
+                "⚠️ Format invalide.\n\nSyntaxe : *AJOUTER 2250XXXXXXXXX*", message_id)
+            return True
+        # Vérifier si déjà inscrit
+        user_exist = get_utilisateur(telephone_cible)
+        if user_exist:
+            envoyer_whatsapp(expediteur,
+                f"ℹ️ Le numéro *{telephone_cible}* est déjà inscrit.\n\n"
+                f"👤 {user_exist.get('nom_prenom','?').upper()}\n"
+                f"💼 {user_exist.get('position','?').replace('_',' ')}\n"
+                f"🎭 {user_exist.get('role','?')}\n\n"
+                f"Pour modifier son rôle : *ROLE {telephone_cible} [1|2|3]*\n"
+                f"Pour modifier sa position : *POSITION {telephone_cible} [1-9]*", message_id)
+            return True
+        # Démarrer le flux d'ajout admin
+        set_conversation(expediteur, "admin_add_1", {"telephone_cible": telephone_cible})
+        envoyer_whatsapp(expediteur,
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 AJOUT UTILISATEUR\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 Numéro : *{telephone_cible}*\n\n"
+            f"ETAPE 1/2 — Indiquez le NOM et PRENOM :\n\n"
+            f"Exemple: KOUASSI Jean-Baptiste\n\n"
+            f"_(Tapez *ANNULER* pour quitter)_", message_id)
+        return True
+
     # --- DESACTIVER un utilisateur ---
     match_deact = re.match(r'^DESACTIVER\s+(\+?\d{10,15})$', msg_upper)
     if match_deact:
@@ -1866,6 +1896,100 @@ def traiter_sessions_interactives(expediteur, message, message_id):
             delete_conversation(expediteur)
             return True
         return afficher_close_avec_resume(expediteur, risque_id, risque, message_id)
+
+    # ---- ADMIN ADD : étape 1 — nom & prénom ----
+    elif etape == "admin_add_1":
+        nom = message.strip()
+        if len(nom) < 3:
+            envoyer_whatsapp(expediteur,
+                "⚠️ Veuillez indiquer le NOM et PRENOM complets.\n\n"
+                "Exemple: KOUASSI Jean-Baptiste\n\n"
+                "_(Tapez *ANNULER* pour quitter)_", message_id)
+            return True
+        data["nom_prenom"] = nom
+        set_conversation(expediteur, "admin_add_2", data)
+        envoyer_whatsapp(expediteur,
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 AJOUT UTILISATEUR\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 Numéro : *{data['telephone_cible']}*\n"
+            f"👤 Nom : *{nom.upper()}*\n\n"
+            f"ETAPE 2/2 — Choisissez la POSITION :\n\n"
+            f"1. DIRECTEUR PROJET\n"
+            f"2. PMO\n"
+            f"3. CONSULTANT EXTERNE\n"
+            f"4. CHEF DE PROJET\n"
+            f"5. COORDINATEUR PROJET\n"
+            f"6. SUPERVISEUR\n"
+            f"7. TEAM LEADER\n"
+            f"8. TECHNICIEN\n"
+            f"9. AUTRE STAKEHOLDER\n\n"
+            f"Répondez par le NUMERO (1 à 9).\n\n"
+            f"_(Tapez *!* pour revenir | *ANNULER* pour quitter)_", message_id)
+        return True
+
+    # ---- ADMIN ADD : étape 2 — position ----
+    elif etape == "admin_add_2":
+        msg_upper_local = message.strip().upper()
+
+        if msg_upper_local == "!":
+            set_conversation(expediteur, "admin_add_1", data)
+            envoyer_whatsapp(expediteur,
+                f"↩️ Retour à l'étape précédente.\n\n"
+                f"📞 Numéro : *{data['telephone_cible']}*\n\n"
+                f"Indiquez le NOM et PRENOM :\n\n"
+                f"_(Tapez *ANNULER* pour quitter)_", message_id)
+            return True
+
+        position = POSITIONS.get(message.strip())
+        if not position:
+            envoyer_whatsapp(expediteur,
+                "⚠️ Choix invalide. Répondez par un numéro de 1 à 9.", message_id)
+            return True
+
+        telephone_cible = data.get("telephone_cible")
+        nom_prenom = data.get("nom_prenom")
+
+        # Créer l'utilisateur directement actif
+        success = creer_utilisateur(
+            telephone=telephone_cible,
+            nom_prenom=nom_prenom,
+            position=position,
+            role="UTILISATEUR",
+            actif=True,
+            valide=True
+        )
+        delete_conversation(expediteur)
+
+        if not success:
+            envoyer_whatsapp(expediteur,
+                f"❌ Erreur lors de la création du compte.\n"
+                f"Le numéro *{telephone_cible}* existe peut-être déjà.", message_id)
+            return True
+
+        # Confirmation à l'admin
+        envoyer_whatsapp(expediteur,
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ UTILISATEUR CREE\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 Numéro : *{telephone_cible}*\n"
+            f"👤 Nom : *{nom_prenom.upper()}*\n"
+            f"💼 Position : *{position.replace('_', ' ')}*\n"
+            f"🎭 Rôle : UTILISATEUR\n\n"
+            f"Le compte est actif immédiatement.\n"
+            f"Pour modifier le rôle : *ROLE {telephone_cible} 2*", message_id)
+
+        # Notifier l'utilisateur ajouté
+        envoyer_whatsapp(telephone_cible,
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎉 BIENVENUE sur DigitalRiskPlatform !\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 {nom_prenom.upper()}\n"
+            f"💼 {position.replace('_', ' ')}\n\n"
+            f"Votre compte a été créé par un administrateur.\n\n"
+            f"Envoyez *#* pour signaler un risque.\n"
+            f"Tapez *AIDE* pour voir toutes les commandes.")
+        return True
 
     return False
 
