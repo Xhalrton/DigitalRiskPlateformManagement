@@ -1207,7 +1207,8 @@ Ne renvoie que le JSON, rien d'autre"""
 # ============================================================
 
 ETAPES_PRECEDENTES = {
-    2: 1, 3: 2, 4: 3, 5: 4, 6: 5
+    2: 1, 3: 2, 4: 3, 5: 4, 6: 5,
+    "3_LIBRE": 3  # Saisie libre → retour à la liste projets
 }
 
 def envoyer_formulaire_etape(numero, etape, data=None, message_id=None):
@@ -1335,8 +1336,9 @@ def traiter_etape_conversation(expediteur, message, message_id):
         etape = int(etape)
     except (ValueError, TypeError):
         pass
-    # Ignorer si la session est une session non-formulaire (STAT, close_reason, etc.)
-    if not isinstance(etape, int):
+    # Étapes du formulaire autorisées (int ou string spécifique)
+    ETAPES_FORMULAIRE = [1, 2, 3, 4, 5, 6, "3_LIBRE"]
+    if etape not in ETAPES_FORMULAIRE:
         return False
 
     data = conv["data"] if isinstance(conv["data"], dict) else {}
